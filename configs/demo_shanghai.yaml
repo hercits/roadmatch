@@ -1,0 +1,62 @@
+project:
+  name: demo
+
+paths:
+  data_dir: data/shanghai
+  output_dir: outputs/demo
+  graphml: graph.graphml
+  road_graph_json: road_graph.json
+  nodes_geojson: nodes.geojson
+  edges_geojson: edges.geojson
+
+osm:
+  # OSMnx 2.x bbox order: [left, bottom, right, top] = [west, south, east, north]
+  bbox: [121.27, 31.15, 121.57, 31.29]
+  network_type: drive
+  simplify: true
+  retain_all: false
+
+demo:
+  target_length_m: 20000
+  target_min_m: 18000
+  target_max_m: 24000
+  start:
+    name: Shanghai Hongqiao Railway Station
+    lon: 121.3188
+    lat: 31.1947
+  end_candidates:
+    - name: Lujiazui
+      lon: 121.5070
+      lat: 31.2397
+    - name: People's Square
+      lon: 121.4750
+      lat: 31.2304
+    - name: Jing'an Temple
+      lon: 121.4453
+      lat: 31.2234
+    - name: Century Avenue
+      lon: 121.5273
+      lat: 31.2287
+
+noise:
+  length_multiplier_mean: 1.15
+  length_multiplier_std: 0.03
+  length_tolerance_ratio: 0.15
+  detected_intersection_ratio: 0.30
+  straight_accuracy: 0.90
+  turn_accuracy: 0.40
+  interval_half_width_m: 90
+  interval_jitter_m: 35
+
+matching:
+  top_k: 5
+  generated_paths: 20
+  length_window_ratio: 0.35
+  turn_threshold_degrees: 35
+  event_position_softness_m: 180
+  weights:
+    length: 0.45
+    events: 0.55
+    event_position: 0.50
+    event_movement: 0.35
+    event_interchange: 0.15
