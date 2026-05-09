@@ -62,9 +62,12 @@ def write_map_html(
     features = candidate_features(candidates, report)
     event_features = _event_features(graph, report)
     center = _map_center(features, detection)
+
+    truth_feature = _truth_feature(graph, detection)
     payload = {
         "candidates": {"type": "FeatureCollection", "features": features},
         "events": {"type": "FeatureCollection", "features": event_features},
+        "truth": truth_feature,
         "start": detection.start.to_dict(),
         "end": detection.end.to_dict(),
         "summary": {
@@ -76,11 +79,24 @@ def write_map_html(
 
     title = "Roadmatch"
     top = report.get("candidates", [{}])[0] if report.get("candidates") else {}
-    subtitle = (
+    has_truth = truth_feature is not None
+    subtitle_parts = [
         f"Top path {html.escape(str(top.get('path_id', 'n/a')))} · "
         f"confidence {float(top.get('confidence', 0.0)):.2%} · "
         f"length {float(top.get('length_m', 0.0)):.0f} m"
-    )
+    ]
+    if has_truth:
+        truth_length = truth_feature["properties"]["length_m"]
+        truth_nodes = truth_feature["properties"]["node_count"]
+        top_length = float(top.get("length_m", 0.0))
+        top_nodes = len(top.get("nodes", [])) if top.get("nodes") else 0
+        length_diff = abs(top_length - truth_length)
+        node_cov = _node_coverage(top.get("nodes", []), truth_feature["properties"]["nodes"])
+        subtitle_parts.append(
+            f"Truth: {truth_length:.0f} m, {truth_nodes} nodes · "
+            f"vs Top-1: Δ{length_diff:.0f} m, node coverage {node_cov:.1%}"
+        )
+    subtitle = " · ".join(subtitle_parts)
     script_payload = json.dumps(payload, ensure_ascii=False)
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -146,6 +162,7 @@ def write_map_html(
       <span class="swatch" style="background:#2563eb"></span><span>Top candidate</span>
       <span class="swatch" style="background:#f97316"></span><span>Other candidates</span>
       <span class="swatch" style="background:#7c3aed"></span><span>Matched detections</span>
+      <span class="swatch" style="background:#059669"></span><span>Truth path</span>
     </div>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -201,6 +218,25 @@ def write_map_html(
         }}
       }}).addTo(map);
 
+      if (data.truth) {{
+        L.geoJSON(data.truth, {{
+          style: {{
+            color: '#059669',
+            weight: 5,
+            opacity: 0.70,
+            dashArray: '10 6'
+          }},
+          onEachFeature: (feature, l) => {{
+            const p = feature.properties;
+            l.bindPopup(
+              `<b>Truth path</b><br>` +
+              `length: ${{p.length_m.toFixed(0)}} m<br>` +
+              `nodes: ${{p.node_count}}`
+            );
+          }}
+        }}).addTo(map);
+      }}
+
       L.marker([data.start.lat, data.start.lon]).addTo(map).bindPopup(`Start: ${{data.start.name}}`);
       L.marker([data.end.lat, data.end.lon]).addTo(map).bindPopup(`End: ${{data.end.name}}`);
       if (layer.getBounds().isValid()) {{
@@ -255,6 +291,12 @@ def write_map_html(
           `stroke-linejoin="round" opacity="${{opacity}}"><title>${{feature.properties.path_id}}</title></polyline>`;
       }}).join('');
 
+      const truthLine = data.truth
+        ? `<polyline points="${{points(data.truth.geometry.coordinates)}}" fill="none" ` +
+          `stroke="#059669" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" ` +
+          `stroke-dasharray="10 6" opacity="0.70"><title>Truth path</title></polyline>`
+        : '';
+
       const eventDots = data.events.features.map(feature => {{
         const [x, y] = project(feature.geometry.coordinates);
         return `<circle cx="${{x}}" cy="${{y}}" r="4" fill="#7c3aed" stroke="#fff" stroke-width="1.5" opacity="0.92"/>`;
@@ -266,7 +308,7 @@ def write_map_html(
         `<g opacity="0.22" stroke="#94a3b8" stroke-width="1">` +
         `<line x1="${{pad}}" y1="${{height - pad}}" x2="${{width - pad}}" y2="${{height - pad}}"/>` +
         `<line x1="${{pad}}" y1="${{pad}}" x2="${{pad}}" y2="${{height - pad}}"/>` +
-        `</g>${{lines}}${{eventDots}}` +
+        `</g>${{truthLine}}${{lines}}${{eventDots}}` +
         `${{marker([data.start.lon, data.start.lat], '#0f766e', 'Start')}}` +
         `${{marker([data.end.lon, data.end.lat], '#be123c', 'End')}}` +
         `<text x="${{width - pad}}" y="${{height - 24}}" text-anchor="end" font-size="12" fill="#475569">` +
@@ -317,3 +359,36 @@ def _map_center(features: List[Dict[str, Any]], detection: DetectionSet) -> tupl
     lon = sum(coord[0] for coord in coords) / len(coords)
     lat = sum(coord[1] for coord in coords) / len(coords)
     return lon, lat
+
+
+def _truth_feature(graph: RoadGraph, detection: DetectionSet) -> Optional[Dict[str, Any]]:
+    if detection.truth is None:
+        return None
+    truth_nodes = detection.truth.get("path_nodes")
+    if not truth_nodes:
+        return None
+    try:
+        geometry = graph.path_geometry(truth_nodes)
+    except Exception:
+        return None
+    length_m = graph.path_length(truth_nodes)
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[lon, lat] for lon, lat in geometry],
+        },
+        "properties": {
+            "length_m": length_m,
+            "node_count": len(truth_nodes),
+            "nodes": list(truth_nodes),
+        },
+    }
+
+
+def _node_coverage(candidate_nodes: List[str], truth_nodes: List[str]) -> float:
+    if not truth_nodes:
+        return 0.0
+    c_set = set(candidate_nodes)
+    t_set = set(truth_nodes)
+    return len(c_set & t_set) / max(len(t_set), 1)
