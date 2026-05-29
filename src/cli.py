@@ -8,9 +8,8 @@ from utils.errors import OSMFetchError
 
 
 def _resolve_resource_root() -> Path:
-    """返回与 src 目录同级的 resource 目录路径。"""
-    src_dir = Path(__file__).resolve().parent.parent
-    return src_dir.parent / "resource"
+    """返回项目根目录下的 resource 目录路径。"""
+    return Path(__file__).resolve().parent.parent / "resource"
 
 
 def build_parser() -> argparse.ArgumentParser:

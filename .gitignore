@@ -6,3 +6,11 @@ __pycache__/
 data/
 outputs/
 *.egg-info/
+
+# Data directories
+cache/
+resource/
+
+# IDE and session files
+.idea/
+session-*.md

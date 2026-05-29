@@ -1,41 +1,13 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "roadmatch"
 version = "0.1.0"
-description = "Recover likely real road-network routes from noisy optical-cable crossing detections."
-readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [
-  { name = "Roadmatch Contributors" }
-]
+requires-python = ">=3.12"
 dependencies = [
-  "osmnx>=2.1.0",
-  "networkx>=3.2",
-  "geopandas>=0.14",
-  "shapely>=2.0",
-  "PyYAML>=6.0",
+    "geopandas>=1.1.3",
+    "networkx>=3.6.1",
+    "osmnx>=2.1.0",
+    "plotly>=6.7.0",
+    "pyyaml>=6.0.3",
+    "rustworkx>=0.17.1",
+    "shapely>=2.1.2",
 ]
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.0",
-  "ruff>=0.5",
-]
-
-[project.scripts]
-roadmatch = "roadmatch.cli:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
