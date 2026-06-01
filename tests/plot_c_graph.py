@@ -19,9 +19,11 @@ import plotly.graph_objects as go
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from mock.edge_splitter import split_edges_at_intersections
 from mock.graph_simplifier import (
     build_c_edge_graph,
     cluster_near_parallel_edges,
+    find_crossroad_nodes,
 )
 from utils.geometry import get_bounds_center
 
@@ -49,6 +51,49 @@ _CLUSTER_COLORS = [
     "#7209b7", "#3a0ca3", "#4361ee", "#4cc9f0", "#06d6a0",
     "#118ab2", "#073b4c", "#ffd166", "#ef476f", "#26547c",
 ]
+
+
+def build_crossroad_trace(
+    crossroad_nodes: dict[str, dict],
+    node_coords: dict[str, tuple],
+    c_edges: list[dict]
+) -> go.Scattermap:
+    """Build trace for crossroad nodes with enlarged markers and numbers."""
+    lons, lats, texts, hover_texts = [], [], [], []
+    
+    # Sort by node_id for deterministic numbering
+    sorted_nodes = sorted(crossroad_nodes.items(), key=lambda x: x[0])
+    
+    for idx, (node_id, info) in enumerate(sorted_nodes):
+        if node_id in node_coords:
+            coord = node_coords[node_id]
+            lons.append(coord[0])
+            lats.append(coord[1])
+            texts.append(str(idx))  # Sequential number label
+            
+            # Build hover text with C-edge details
+            ce_details = []
+            for ce_idx in info['c_edges']:
+                ce = c_edges[ce_idx]
+                ce_details.append(f"C{ce_idx}({ce['direction_deg']:.1f}°)")
+            
+            hover = f"Crossroad {idx}<br>"
+            hover += f"C-edges: {', '.join(ce_details)}<br>"
+            hover += f"Max angle diff: {info['max_angle_diff']:.1f}°"
+            hover_texts.append(hover)
+    
+    return go.Scattermap(
+        lon=lons,
+        lat=lats,
+        mode="markers+text",
+        marker=dict(size=12, color="#e63946", symbol="circle"),
+        text=texts,
+        textposition="top center",
+        textfont=dict(size=10, color="#000000"),
+        name=f"Crossroads ({len(crossroad_nodes)})",
+        hovertext=hover_texts,
+        hoverinfo="text",
+    )
 
 
 def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> list[go.Scattermap]:
@@ -130,7 +175,7 @@ def plot_c_edge_graph(
     edges_path: Path,
     nodes_path: Path | None = None,
     output_path: Path | None = None,
-    near_threshold_m: float = 30.0,
+    near_threshold_m: float = 50.0,
     parallel_angle_threshold: float = 15.0,
     overlap_ratio_threshold: float = 0.5,
     overlap_length_threshold_m: float = 120.0,
@@ -140,6 +185,16 @@ def plot_c_edge_graph(
     if nodes_path is None:
         nodes_path = edges_path.parent / "nodes.geojson"
     node_features = load_geojson(nodes_path) if nodes_path.exists() else []
+
+    print(f"Original: {len(edge_features)} edges, {len(node_features)} nodes")
+
+    # Split edges at intersections
+    print("Splitting edges at intersections...")
+    edge_features, node_features, split_indices = split_edges_at_intersections(
+        edge_features, node_features
+    )
+    print(f"After splitting: {len(edge_features)} edges, {len(node_features)} nodes")
+    print(f"Split {len(split_indices)} edges")
 
     print(f"Clustering {len(edge_features)} edges...")
     edge_clusters, core_edges = cluster_near_parallel_edges(
@@ -161,11 +216,20 @@ def plot_c_edge_graph(
 
     print(f"C-edges: {len(c_edges)}")
 
+    print("Finding crossroad nodes...")
+    crossroad_nodes = find_crossroad_nodes(
+        c_edges, edge_clusters, edge_features,
+        parallel_angle_threshold=parallel_angle_threshold
+    )
+    print(f"Crossroad nodes: {len(crossroad_nodes)}")
+
     center = get_bounds_center(edge_features)
 
     traces = build_c_edge_traces(c_edges, node_coords)
+    if crossroad_nodes:
+        traces.append(build_crossroad_trace(crossroad_nodes, node_coords, c_edges))
 
-    title_text = f"C-edge graph: {len(c_edges)} C-edges"
+    title_text = f"C-edge graph: {len(c_edges)} C-edges, {len(crossroad_nodes)} crossroads"
 
     fig = go.Figure(data=traces)
     fig.update_layout(
@@ -198,7 +262,7 @@ def main() -> None:
     parser.add_argument("--edges", type=Path, default=None)
     parser.add_argument("--nodes", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--near-threshold", type=float, default=30.0)
+    parser.add_argument("--near-threshold", type=float, default=50.0)
     parser.add_argument("--parallel-angle-threshold", type=float, default=15.0)
     parser.add_argument("--overlap-ratio", type=float, default=0.5)
     parser.add_argument("--overlap-length", type=float, default=120.0)

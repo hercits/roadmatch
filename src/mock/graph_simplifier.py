@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import geopandas as gpd
-from shapely.geometry import LineString
+from shapely.geometry import LineString, MultiPoint, Point
 
 from utils.geometry import (
     angular_delta_mod180,
@@ -131,7 +131,7 @@ def cluster_near_parallel_edges(
 
         clusters.append(cluster)
 
-    clusters, core_edges = merge_subset_clusters(clusters, edge_features)
+    clusters, core_edges = merge_subset_clusters(clusters, edge_features, near_threshold_m)
 
     return clusters, core_edges
 
@@ -139,13 +139,14 @@ def cluster_near_parallel_edges(
 def merge_subset_clusters(
     clusters: List[List[int]],
     edge_features: List[Dict[str, Any]],
+    near_threshold_m: float = 30.0,
 ) -> tuple[List[List[int]], Dict[int, set]]:
-    """Merge clusters whose node-set is a strict subset of another cluster.
+    """Merge clusters via node-set subset and convex hull containment.
 
-    A cluster's node-set is the set of all endpoint node IDs of its edges.
-    If cluster A's node-set is a strict subset of cluster B's, A is merged
-    into B. If multiple candidate B clusters exist, the first one found is
-    chosen. Singletons are treated as normal clusters.
+    Two-pass approach:
+    1. Node-set strict subset: merge A into B if A's nodes ⊂ B's nodes
+    2. Convex hull containment: merge A into B if all A's nodes are within
+       B's buffered convex hull (buffer = near_threshold_m / 2)
 
     Core edges (the absorber cluster's original edges) are tracked separately
     so that direction checks can exclude merged edges.
@@ -153,10 +154,11 @@ def merge_subset_clusters(
     Args:
         clusters: List of edge index lists (clusters).
         edge_features: Edge GeoJSON features.
+        near_threshold_m: Distance threshold for hull buffering, default 30m.
 
     Returns:
         Tuple of (merged_clusters, core_edges_per_cluster).
-        merged_clusters: Merged clusters with no subset relationships remaining.
+        merged_clusters: Merged clusters with no subset/containment relationships.
         core_edges_per_cluster: Dict mapping new cluster index to set of core edge indices.
     """
     cluster_node_sets: List[set] = []
@@ -178,9 +180,84 @@ def merge_subset_clusters(
         for j in range(len(clusters)):
             if i == j or j in merge_into:
                 continue
-            if cluster_node_sets[i] < cluster_node_sets[j]:
+            if cluster_node_sets[i] <= cluster_node_sets[j]:
                 merge_into[i] = j
                 break
+
+    alive = [i for i in range(len(clusters)) if i not in merge_into]
+
+    if len(alive) > 1:
+        node_coords: Dict[str, tuple] = {}
+        for c in clusters:
+            for edge_idx in c:
+                coords = edge_features[edge_idx]['geometry']['coordinates']
+                props = edge_features[edge_idx]['properties']
+                u, v = props['u'], props['v']
+                if u not in node_coords:
+                    node_coords[u] = (coords[0][0], coords[0][1])
+                if v not in node_coords:
+                    node_coords[v] = (coords[-1][0], coords[-1][1])
+
+        all_points = list(node_coords.values())
+        gdf_all = gpd.GeoDataFrame(
+            geometry=[Point(lon, lat) for lon, lat in all_points],
+            crs='EPSG:4326'
+        )
+
+        center_lon = sum(p[0] for p in all_points) / len(all_points)
+        center_lat = sum(p[1] for p in all_points) / len(all_points)
+        zone_number = int((center_lon + 180) / 6) + 1
+        utm_epsg = 32600 + zone_number if center_lat >= 0 else 32700 + zone_number
+
+        gdf_proj = gdf_all.to_crs(utm_epsg)
+        proj_coords = [(p.x, p.y) for p in gdf_proj.geometry]
+
+        node_to_proj: Dict[str, tuple] = {}
+        for node_id, proj_pt in zip(node_coords.keys(), proj_coords):
+            node_to_proj[node_id] = proj_pt
+
+        buffer_radius_m = near_threshold_m / 2.0
+
+        cluster_hulls: Dict[int, Any] = {}
+        cluster_bboxes: Dict[int, tuple] = {}
+
+        for i in alive:
+            nodes = cluster_node_sets[i]
+            if len(nodes) == 0:
+                continue
+            proj_points = [Point(node_to_proj[n]) for n in nodes]
+            hull = MultiPoint(proj_points).convex_hull
+            buffered_hull = hull.buffer(buffer_radius_m)
+            cluster_hulls[i] = buffered_hull
+            cluster_bboxes[i] = buffered_hull.bounds
+
+        for i in alive:
+            if i in merge_into:
+                continue
+            nodes_i = cluster_node_sets[i]
+            proj_points_i = [node_to_proj[n] for n in nodes_i]
+            min_x_i = min(p[0] for p in proj_points_i)
+            max_x_i = max(p[0] for p in proj_points_i)
+            min_y_i = min(p[1] for p in proj_points_i)
+            max_y_i = max(p[1] for p in proj_points_i)
+
+            for j in alive:
+                if i == j or j in merge_into:
+                    continue
+                if len(nodes_i) >= len(cluster_node_sets[j]):
+                    continue
+
+                bbox_j = cluster_bboxes[j]
+                if not (min_x_i >= bbox_j[0] and max_x_i <= bbox_j[2] and
+                        min_y_i >= bbox_j[1] and max_y_i <= bbox_j[3]):
+                    continue
+
+                hull_j = cluster_hulls[j]
+                all_inside = all(Point(p).within(hull_j) for p in proj_points_i)
+
+                if all_inside:
+                    merge_into[i] = j
+                    break
 
     merged_clusters: Dict[int, List[int]] = {}
     absorber: Dict[int, int] = {}
@@ -331,3 +408,97 @@ def build_c_edge_graph(
         })
 
     return c_edges
+
+
+def find_crossroad_nodes(
+    c_edges: List[Dict[str, Any]],
+    edge_clusters: List[List[int]],
+    edge_features: List[Dict[str, Any]],
+    parallel_angle_threshold: float = 15.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Find nodes that are potential crossroads.
+    
+    A crossroad node:
+    1. Appears in at least 2 C-edges
+    2. Is an endpoint of at least one C-edge
+    3. At least one pair of C-edges containing it has angle difference > threshold
+    
+    Args:
+        c_edges: List of C-edge dicts
+        edge_clusters: List of edge index lists for each C-edge
+        edge_features: Original edge GeoJSON features
+        parallel_angle_threshold: Angle threshold in degrees
+        
+    Returns:
+        Dict mapping node_id -> {
+            'c_edges': list of C-edge indices,
+            'is_endpoint': bool,
+            'max_angle_diff': float
+        }
+    """
+    from utils.geometry import angular_delta_mod180
+    
+    # Step 1: Build node-to-C-edges mapping
+    node_to_cedges: Dict[str, List[int]] = {}
+    
+    for ce_idx, c_edge in enumerate(c_edges):
+        # Get all nodes from this C-edge's cluster
+        cluster_edges = edge_clusters[ce_idx]
+        for edge_idx in cluster_edges:
+            props = edge_features[edge_idx]['properties']
+            u, v = props['u'], props['v']
+            
+            if u not in node_to_cedges:
+                node_to_cedges[u] = []
+            if ce_idx not in node_to_cedges[u]:
+                node_to_cedges[u].append(ce_idx)
+            
+            if v not in node_to_cedges:
+                node_to_cedges[v] = []
+            if ce_idx not in node_to_cedges[v]:
+                node_to_cedges[v].append(ce_idx)
+    
+    # Step 2: Filter candidates (2+ C-edges, endpoint of at least one)
+    candidates = {}
+    for node_id, ce_indices in node_to_cedges.items():
+        if len(ce_indices) < 2:
+            continue
+        
+        # Check if endpoint of at least one C-edge
+        is_endpoint = False
+        for ce_idx in ce_indices:
+            ce = c_edges[ce_idx]
+            if ce['start_node_id'] == node_id or ce['end_node_id'] == node_id:
+                is_endpoint = True
+                break
+        
+        if not is_endpoint:
+            continue
+        
+        candidates[node_id] = ce_indices
+    
+    # Step 3: Check angle differences
+    crossroad_nodes = {}
+    for node_id, ce_indices in candidates.items():
+        max_angle_diff = 0.0
+        
+        # Check all pairs
+        for i in range(len(ce_indices)):
+            for j in range(i + 1, len(ce_indices)):
+                ce_i = c_edges[ce_indices[i]]
+                ce_j = c_edges[ce_indices[j]]
+                angle_diff = angular_delta_mod180(
+                    ce_i['direction_deg'],
+                    ce_j['direction_deg']
+                )
+                max_angle_diff = max(max_angle_diff, angle_diff)
+        
+        # If max angle diff > threshold, it's a crossroad
+        if max_angle_diff > parallel_angle_threshold:
+            crossroad_nodes[node_id] = {
+                'c_edges': ce_indices,
+                'is_endpoint': True,
+                'max_angle_diff': max_angle_diff
+            }
+    
+    return crossroad_nodes
