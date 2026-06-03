@@ -146,6 +146,46 @@ def angular_delta_mod180(a: float, b: float) -> float:
     return min(d, 180.0 - d)
 
 
+def line_intersection_2d(
+    p1: Coordinate, p2: Coordinate,
+    p3: Coordinate, p4: Coordinate,
+) -> Coordinate | None:
+    """Find intersection of two infinite lines defined by point pairs.
+
+    Lines are infinite (not segments), defined by two points each:
+    line1 = (p1, p2), line2 = (p3, p4).
+
+    Args:
+        p1: First point on line 1 (lon, lat).
+        p2: Second point on line 1 (lon, lat).
+        p3: First point on line 2 (lon, lat).
+        p4: Second point on line 2 (lon, lat).
+
+    Returns:
+        Intersection point (lon, lat) or None if lines are parallel.
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    x4, y4 = p4
+
+    # Denominator for parametric intersection
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+
+    # Check for parallel lines
+    if abs(denom) < 1e-10:
+        return None
+
+    # Compute parameter t for line 1
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+
+    # Compute intersection point
+    x = x1 + t * (x2 - x1)
+    y = y1 + t * (y2 - y1)
+
+    return (x, y)
+
+
 def circular_span_mod180(values: Sequence[float]) -> float:
     """Calculate the minimum arc that contains all values on the [0, 180) circle.
 
