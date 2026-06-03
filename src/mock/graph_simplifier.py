@@ -1417,17 +1417,33 @@ def create_virtual_cnodes(
                     break
 
         # Track which end of each C-edge this cluster is associated with
+        # Use expanded endpoint nodes (cedge_endpoint_nodes) instead of exact start/end node matching
         c_edge_end_associations = set()
         for ce_idx in connected_cedges:
             ce = c_edges[ce_idx]
-            start_node = ce['start_node_id']
-            end_node = ce['end_node_id']
+            ep_nodes = cedge_endpoint_nodes.get(ce_idx, set())
             
-            # Check if any node in cluster is the start or end of this C-edge
+            # Project all endpoint nodes onto C-edge direction to split into start/end groups
+            start_proj = project_to_bearing_m(ce['start_coord'], ce['start_coord'], ce['direction_deg'])
+            end_proj = project_to_bearing_m(ce['end_coord'], ce['start_coord'], ce['direction_deg'])
+            mid_proj = (start_proj + end_proj) / 2
+            
+            start_end_nodes = set()
+            end_end_nodes = set()
+            for ep_node in ep_nodes:
+                if ep_node not in node_coords:
+                    continue
+                proj = project_to_bearing_m(node_coords[ep_node], ce['start_coord'], ce['direction_deg'])
+                if proj < mid_proj:
+                    start_end_nodes.add(ep_node)
+                else:
+                    end_end_nodes.add(ep_node)
+            
+            # Check if any cluster node is in start-end or end-end group
             for node in nodes:
-                if node == start_node:
+                if node in start_end_nodes:
                     c_edge_end_associations.add((ce_idx, 'start'))
-                if node == end_node:
+                if node in end_end_nodes:
                     c_edge_end_associations.add((ce_idx, 'end'))
 
         # Count how many C-edges actually end at this cluster

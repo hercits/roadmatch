@@ -85,10 +85,18 @@ def main():
                 print(f"    {nid} -> {node_coords[nid]}")
     
     print("\n" + "=" * 70)
-    print("C-node analysis: 439, 442, 443")
+    print("C-node analysis: C-edges 430, 431, 893, 894")
     print("=" * 70)
     
-    for cnode_id in [439, 442, 443]:
+    # Find all C-nodes connected to target C-edges
+    relevant_cnodes = []
+    for cnode_id, vnode in virtual_cnodes.items():
+        if vnode['connected_cedges'] & set(target_cedges):
+            relevant_cnodes.append(cnode_id)
+    relevant_cnodes.sort()
+    print(f"\nC-nodes connected to {target_cedges}: {relevant_cnodes}")
+    
+    for cnode_id in relevant_cnodes:
         vnode = virtual_cnodes[cnode_id]
         print(f"\n{'─' * 60}")
         print(f"C-node {cnode_id}")
