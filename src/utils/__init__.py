@@ -1,5 +1,5 @@
 from utils.errors import ConfigError, GraphError, OSMFetchError, RoadmatchError
-from utils.types import Coordinate
+from utils.types import Coordinate, HIGHWAY_LEVEL
 from utils.osm import (
     fetch_osm_road_network,
     convert_osmnx_to_geojson,
@@ -32,6 +32,7 @@ __all__ = [
     "OSMFetchError",
     "RoadmatchError",
     "Coordinate",
+    "HIGHWAY_LEVEL",
     "fetch_osm_road_network",
     "convert_osmnx_to_geojson",
     "save_osmnx_as_geojson_separate",

@@ -19,6 +19,7 @@ from utils.geometry import (
     project_to_bearing_m,
     segment_overlap_length_m,
 )
+from utils.types import HIGHWAY_LEVEL
 
 
 def cluster_near_parallel_edges(
@@ -280,7 +281,22 @@ def merge_subset_clusters(
     return result_clusters, result_core_edges
 
 
-
+def _edge_highway_level(edge_feature: Dict[str, Any]) -> int:
+    """Get highway level for an edge. Lower value = higher priority.
+    
+    For multi-value highway tags (list), takes the minimum (highest priority).
+    Returns 99 for unknown/missing highway types.
+    """
+    highway = edge_feature.get('properties', {}).get('highway')
+    if highway is None:
+        return 99
+    
+    if isinstance(highway, list):
+        if not highway:
+            return 99
+        return min(HIGHWAY_LEVEL.get(h, 99) for h in highway)
+    
+    return HIGHWAY_LEVEL.get(highway, 99)
 
 
 
@@ -324,14 +340,20 @@ def build_c_edge_graph(
     for ce_idx, ec in enumerate(edge_clusters):
         core = core_edges_per_cluster.get(ce_idx, set(ec)) if core_edges_per_cluster else set(ec)
 
-        # Compute major direction from core edges
-        core_directions = [edge_features[idx]['properties']['direction_deg'] for idx in core]
+        levels = {idx: _edge_highway_level(edge_features[idx]) for idx in core}
+        min_level = min(levels.values()) if levels else 99
+        priority_core = {idx for idx, lvl in levels.items() if lvl == min_level}
+        if not priority_core:
+            priority_core = core
+
+        # Compute major direction from priority core edges
+        core_directions = [edge_features[idx]['properties']['direction_deg'] for idx in priority_core]
         major_dir = median_direction_mod180(core_directions)
 
-        # Get core edge coordinates for liquidification
+        # Get priority core edge coordinates for liquidification
         core_line_coords = [
             edge_features[edge_idx]['geometry']['coordinates']
-            for edge_idx in core
+            for edge_idx in priority_core
         ]
 
         if not core_line_coords:
@@ -344,9 +366,9 @@ def build_c_edge_graph(
         liquid_shape = liquidify_lines(core_line_coords, edge_buffer_radius_m, utm_epsg)
         origin = centroid_to_geo(liquid_shape, utm_epsg)
 
-        # Project all core edge endpoints onto the major direction
+        # Project priority core edge endpoints onto the major direction
         t_values: List[float] = []
-        for edge_idx in core:
+        for edge_idx in priority_core:
             coords = edge_features[edge_idx]['geometry']['coordinates']
             p1 = (coords[0][0], coords[0][1])
             p2 = (coords[-1][0], coords[-1][1])
@@ -1214,6 +1236,115 @@ def identify_endpoint_nodes_for_cedge(
     return endpoint_nodes
 
 
+def _compute_cnode_position(
+    nodes: List[str],
+    connected_cedges: set,
+    c_edge_end_associations: set,
+    c_edges: List[Dict[str, Any]],
+    node_coords: Dict[str, tuple],
+) -> tuple:
+    """Compute C-node position based on connected C-edges and end associations.
+    
+    Args:
+        nodes: List of node IDs in this cluster.
+        connected_cedges: Set of C-edge indices connected to this cluster.
+        c_edge_end_associations: Set of (ce_idx, end_type) tuples.
+        c_edges: List of C-edge dicts.
+        node_coords: Dict of node_id -> (lon, lat).
+    
+    Returns:
+        Computed position (lon, lat).
+    """
+    # Count how many C-edges actually end at this cluster
+    cedges_ending_here = set(ce_idx for ce_idx, _ in c_edge_end_associations)
+    cedges_ending_count = len(cedges_ending_here)
+    
+    # If 2+ C-edges end here, use average position
+    if cedges_ending_count >= 2:
+        virtual_pos = average_position(nodes, node_coords)
+        if virtual_pos is None:
+            # Fallback: use first valid node's position
+            for node in nodes:
+                if node in node_coords:
+                    virtual_pos = node_coords[node]
+                    break
+    else:
+        # Use direction-based logic
+        # Compute unique directions (rounded to 1°)
+        directions = set()
+        for ce_idx in connected_cedges:
+            directions.add(round(c_edges[ce_idx]['direction_deg']))
+        
+        # Compute position based on number of directions
+        if len(directions) == 1:
+            # 1 direction: average position, project to line
+            avg_pos = average_position(nodes, node_coords)
+            if avg_pos is None:
+                # Fallback: use first valid node's position
+                for node in nodes:
+                    if node in node_coords:
+                        avg_pos = node_coords[node]
+                        break
+            # Use first C-edge to define the line
+            ce_idx = list(connected_cedges)[0]
+            ce = c_edges[ce_idx]
+            virtual_pos = project_to_line(avg_pos, ce['start_coord'], ce['end_coord'])
+        elif len(directions) == 2:
+            # 2 directions: check if they are too similar (nearly parallel)
+            dir_list = sorted(directions)
+            angle_diff = angular_delta_mod180(dir_list[0], dir_list[1])
+            
+            if angle_diff < 5.0:
+                # Nearly parallel lines with different endpoints, use average position
+                # to avoid extremely far intersections
+                virtual_pos = average_position(nodes, node_coords)
+                if virtual_pos is None:
+                    # Fallback: use first valid node's position
+                    for node in nodes:
+                        if node in node_coords:
+                            virtual_pos = node_coords[node]
+                            break
+            else:
+                # Compute intersection
+                ce1 = next(
+                    ce
+                    for ce in connected_cedges
+                    if round(c_edges[ce]['direction_deg']) == dir_list[0]
+                )
+                ce2 = next(
+                    ce
+                    for ce in connected_cedges
+                    if round(c_edges[ce]['direction_deg']) == dir_list[1]
+                )
+                virtual_pos = line_intersection_2d(
+                    c_edges[ce1]['start_coord'],
+                    c_edges[ce1]['end_coord'],
+                    c_edges[ce2]['start_coord'],
+                    c_edges[ce2]['end_coord'],
+                )
+                if virtual_pos is None:
+                    # Parallel lines (shouldn't happen with 2 different directions), use average
+                    virtual_pos = average_position(nodes, node_coords)
+                    if virtual_pos is None:
+                        # Fallback: use first valid node's position
+                        for node in nodes:
+                            if node in node_coords:
+                                virtual_pos = node_coords[node]
+                                break
+        else:
+            # 3+ directions: average position
+            # TODO: improve with better algorithm (e.g., weighted by C-edge importance)
+            virtual_pos = average_position(nodes, node_coords)
+            if virtual_pos is None:
+                # Fallback: use first valid node's position
+                for node in nodes:
+                    if node in node_coords:
+                        virtual_pos = node_coords[node]
+                        break
+    
+    return virtual_pos
+
+
 def create_virtual_cnodes(
     clusters: List[List[str]],
     connection_nodes: Dict[str, set],
@@ -1258,16 +1389,13 @@ def create_virtual_cnodes(
         for node in nodes:
             connected_cedges.update(connection_nodes[node])
 
-        # Count how many nodes in this cluster are endpoint nodes
-        endpoint_node_count = 0
-        for node in nodes:
-            is_endpoint = False
-            for ce_idx in connected_cedges:
+        # Count how many C-edges have at least one endpoint node in this cluster
+        endpoint_cedge_count = 0
+        for ce_idx in connected_cedges:
+            for node in nodes:
                 if node in cedge_endpoint_nodes[ce_idx]:
-                    is_endpoint = True
+                    endpoint_cedge_count += 1
                     break
-            if is_endpoint:
-                endpoint_node_count += 1
 
         # Track which end of each C-edge this cluster is associated with
         c_edge_end_associations = set()
@@ -1283,88 +1411,14 @@ def create_virtual_cnodes(
                 if node == end_node:
                     c_edge_end_associations.add((ce_idx, 'end'))
 
-        # If 2+ nodes are endpoint nodes, use average position
-        if endpoint_node_count >= 2:
-            virtual_pos = average_position(nodes, node_coords)
-            if virtual_pos is None:
-                # Fallback: use first valid node's position
-                for node in nodes:
-                    if node in node_coords:
-                        virtual_pos = node_coords[node]
-                        break
-        else:
-            # Use direction-based logic
-            # Compute unique directions (rounded to 1°)
-            directions = set()
-            for ce_idx in connected_cedges:
-                directions.add(round(c_edges[ce_idx]['direction_deg']))
-
-            # Compute position based on number of directions
-            if len(directions) == 1:
-                # 1 direction: average position, project to line
-                avg_pos = average_position(nodes, node_coords)
-                if avg_pos is None:
-                    # Fallback: use first valid node's position
-                    for node in nodes:
-                        if node in node_coords:
-                            avg_pos = node_coords[node]
-                            break
-                # Use first C-edge to define the line
-                ce_idx = list(connected_cedges)[0]
-                ce = c_edges[ce_idx]
-                virtual_pos = project_to_line(avg_pos, ce['start_coord'], ce['end_coord'])
-            elif len(directions) == 2:
-                # 2 directions: check if they are too similar (nearly parallel)
-                dir_list = sorted(directions)
-                angle_diff = angular_delta_mod180(dir_list[0], dir_list[1])
-                
-                if angle_diff < 5.0:
-                    # Nearly parallel lines with different endpoints, use average position
-                    # to avoid extremely far intersections
-                    virtual_pos = average_position(nodes, node_coords)
-                    if virtual_pos is None:
-                        # Fallback: use first valid node's position
-                        for node in nodes:
-                            if node in node_coords:
-                                virtual_pos = node_coords[node]
-                                break
-                else:
-                    # Compute intersection
-                    ce1 = next(
-                        ce
-                        for ce in connected_cedges
-                        if round(c_edges[ce]['direction_deg']) == dir_list[0]
-                    )
-                    ce2 = next(
-                        ce
-                        for ce in connected_cedges
-                        if round(c_edges[ce]['direction_deg']) == dir_list[1]
-                    )
-                    virtual_pos = line_intersection_2d(
-                        c_edges[ce1]['start_coord'],
-                        c_edges[ce1]['end_coord'],
-                        c_edges[ce2]['start_coord'],
-                        c_edges[ce2]['end_coord'],
-                    )
-                    if virtual_pos is None:
-                        # Parallel lines (shouldn't happen with 2 different directions), use average
-                        virtual_pos = average_position(nodes, node_coords)
-                        if virtual_pos is None:
-                            # Fallback: use first valid node's position
-                            for node in nodes:
-                                if node in node_coords:
-                                    virtual_pos = node_coords[node]
-                                    break
-            else:
-                # 3+ directions: average position
-                # TODO: improve with better algorithm (e.g., weighted by C-edge importance)
-                virtual_pos = average_position(nodes, node_coords)
-                if virtual_pos is None:
-                    # Fallback: use first valid node's position
-                    for node in nodes:
-                        if node in node_coords:
-                            virtual_pos = node_coords[node]
-                            break
+        # Count how many C-edges actually end at this cluster
+        cedges_ending_here = set(ce_idx for ce_idx, _ in c_edge_end_associations)
+        cedges_ending_count = len(cedges_ending_here)
+        
+        # Compute position using helper function
+        virtual_pos = _compute_cnode_position(
+            nodes, connected_cedges, c_edge_end_associations, c_edges, node_coords
+        )
 
         virtual_cnodes[cluster_id] = {
             'id': f'C-node_{cluster_id}',
@@ -1430,14 +1484,16 @@ def create_virtual_cnodes(
         # Remove duplicates
         all_nodes = list(set(all_nodes))
         
-        # Use average position
-        virtual_pos = average_position(all_nodes, node_coords)
-        if virtual_pos is None:
-            # Fallback: use first valid node's position
-            for node in all_nodes:
-                if node in node_coords:
-                    virtual_pos = node_coords[node]
-                    break
+        # Determine position
+        if len(old_cluster_ids) == 1:
+            # Not merged: preserve original position
+            virtual_pos = virtual_cnodes[old_cluster_ids[0]]['position']
+        else:
+            # Merged: re-compute position using the same logic
+            virtual_pos = _compute_cnode_position(
+                all_nodes, all_connected_cedges, all_c_edge_end_associations,
+                c_edges, node_coords
+            )
         
         new_virtual_cnodes[new_id] = {
             'id': f'C-node_{new_id}',
