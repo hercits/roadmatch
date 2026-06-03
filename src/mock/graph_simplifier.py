@@ -366,9 +366,9 @@ def build_c_edge_graph(
         liquid_shape = liquidify_lines(core_line_coords, edge_buffer_radius_m, utm_epsg)
         origin = centroid_to_geo(liquid_shape, utm_epsg)
 
-        # Project priority core edge endpoints onto the major direction
+        # Project all core edge endpoints onto the major direction for extent
         t_values: List[float] = []
-        for edge_idx in priority_core:
+        for edge_idx in core:
             coords = edge_features[edge_idx]['geometry']['coordinates']
             p1 = (coords[0][0], coords[0][1])
             p2 = (coords[-1][0], coords[-1][1])
@@ -1119,6 +1119,7 @@ def identify_endpoint_nodes_for_cedge(
     core_edges: Dict[int, set],
     edge_features: List[Dict[str, Any]],
     node_coords: Dict[str, tuple],
+    near_threshold_m: float = 50.0,
 ) -> set:
     """Identify endpoint nodes for a C-edge.
 
@@ -1126,6 +1127,7 @@ def identify_endpoint_nodes_for_cedge(
     a) It appears in only one core edge of this C-edge, OR
     b) It doesn't appear in any core edge, but appears in only one non-core edge,
        and the nearest core node is an endpoint node.
+    c) It is within near_threshold_m/2 distance of any endpoint identified by (a) or (b).
 
     Args:
         c_edge_idx: Index of the C-edge.
@@ -1134,6 +1136,7 @@ def identify_endpoint_nodes_for_cedge(
         core_edges: Dict mapping C-edge index to set of core edge indices.
         edge_features: List of edge GeoJSON features.
         node_coords: Dict of node_id -> (lon, lat).
+        near_threshold_m: Distance threshold in meters for relaxation (default 50.0).
 
     Returns:
         Set of endpoint node IDs.
@@ -1232,6 +1235,19 @@ def identify_endpoint_nodes_for_cedge(
                 
                 if all_are_endpoints:
                     endpoint_nodes.add(node)
+
+    # Relaxation round: add nodes within near_threshold_m/2 of any endpoint
+    relax_distance = near_threshold_m / 2
+    original_endpoints = endpoint_nodes.copy()
+    for node in all_nodes:
+        if node in endpoint_nodes or node not in node_coords:
+            continue
+        for ep_node in original_endpoints:
+            if ep_node in node_coords:
+                dist = haversine_m(node_coords[node], node_coords[ep_node])
+                if dist <= relax_distance:
+                    endpoint_nodes.add(node)
+                    break
 
     return endpoint_nodes
 
@@ -1353,6 +1369,7 @@ def create_virtual_cnodes(
     edge_clusters: List[List[int]],
     core_edges: Dict[int, set],
     edge_features: List[Dict[str, Any]],
+    near_threshold_m: float = 50.0,
 ) -> Dict[int, Dict[str, Any]]:
     """Create virtual C-nodes at strategic positions.
 
@@ -1364,6 +1381,7 @@ def create_virtual_cnodes(
         edge_clusters: List of edge index lists for each C-edge.
         core_edges: Dict mapping C-edge index to set of core edge indices.
         edge_features: List of edge GeoJSON features.
+        near_threshold_m: Distance threshold in meters for endpoint relaxation (default 50.0).
 
     Returns:
         Dict mapping cluster_id to virtual C-node info:
@@ -1378,7 +1396,8 @@ def create_virtual_cnodes(
     cedge_endpoint_nodes: Dict[int, set] = {}
     for ce_idx in range(len(c_edges)):
         cedge_endpoint_nodes[ce_idx] = identify_endpoint_nodes_for_cedge(
-            ce_idx, c_edges, edge_clusters, core_edges, edge_features, node_coords
+            ce_idx, c_edges, edge_clusters, core_edges, edge_features, node_coords,
+            near_threshold_m=near_threshold_m
         )
 
     virtual_cnodes: Dict[int, Dict[str, Any]] = {}

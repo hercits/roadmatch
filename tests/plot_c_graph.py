@@ -294,7 +294,8 @@ def plot_c_edge_graph(
     print("Creating virtual C-nodes...")
     virtual_cnodes = create_virtual_cnodes(
         clusters, connection_nodes, c_edges, node_coords,
-        edge_clusters, core_edges, edge_features
+        edge_clusters, core_edges, edge_features,
+        near_threshold_m=near_threshold_m
     )
     print(f"Virtual C-nodes: {len(virtual_cnodes)}")
 
