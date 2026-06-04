@@ -29,6 +29,7 @@ cd src && uv run python -m old run-demo --config ../configs/demo_shanghai.yaml
 - **Coordinates**: WGS84, `lon, lat` order (not `lat, lon`)
 - **No test framework**: `tests/` contains plot scripts, no pytest
 - **No linter/formatter**: No ruff, flake8, or pre-commit configured
+- **Commit messages**: 使用中文撰写 commit message
 
 ## Data Directories
 
