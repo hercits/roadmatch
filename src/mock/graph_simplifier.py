@@ -1524,10 +1524,17 @@ def create_virtual_cnodes(
                 dist_to_start = haversine_m(avg_pos, ce['start_coord'])
                 dist_to_end = haversine_m(avg_pos, ce['end_coord'])
                 
-                if dist_to_start <= near_threshold_m:
+                # Project cluster onto C-edge direction
+                start_proj = project_to_bearing_m(ce['start_coord'], ce['start_coord'], ce['direction_deg'])
+                end_proj = project_to_bearing_m(ce['end_coord'], ce['start_coord'], ce['direction_deg'])
+                mid_proj = (start_proj + end_proj) / 2
+                cluster_proj = project_to_bearing_m(avg_pos, ce['start_coord'], ce['direction_deg'])
+                
+                if cluster_proj < mid_proj and dist_to_start <= near_threshold_m:
                     c_edge_end_associations.add((ce_idx, 'start'))
-                elif dist_to_end <= near_threshold_m:
+                elif cluster_proj >= mid_proj and dist_to_end <= near_threshold_m:
                     c_edge_end_associations.add((ce_idx, 'end'))
+                # else: T-junction (middle of C-edge), no association
 
         # Count how many C-edges actually end at this cluster
         cedges_ending_here = set(ce_idx for ce_idx, _ in c_edge_end_associations)
