@@ -1276,8 +1276,12 @@ def _compute_cnode_position(
     c_edges: List[Dict[str, Any]],
     node_coords: Dict[str, tuple],
     near_threshold_m: float = 50.0,
+    parallel_angle_threshold: float = 15.0,
 ) -> tuple:
-    """Compute C-node position based on connected C-edges and end associations.
+    """Compute C-node position based on connected C-edges using geometric intersection.
+    
+    Groups C-edges by direction using parallel_angle_threshold, then computes
+    intersections only between non-parallel groups.
     
     Args:
         nodes: List of node IDs in this cluster.
@@ -1286,125 +1290,134 @@ def _compute_cnode_position(
         c_edges: List of C-edge dicts.
         node_coords: Dict of node_id -> (lon, lat).
         near_threshold_m: Distance threshold for intersection validation (default 50.0).
+        parallel_angle_threshold: Angle threshold for grouping parallel C-edges (default 15.0).
     
     Returns:
         Computed position (lon, lat).
     """
-    # Count how many C-edges actually end at this cluster
-    cedges_ending_here = set(ce_idx for ce_idx, _ in c_edge_end_associations)
-    cedges_ending_count = len(cedges_ending_here)
+    # Group C-edges by direction using parallel_angle_threshold
+    direction_groups: List[List[int]] = []
+    group_representatives: List[float] = []
     
-    # If 2+ C-edges end here, use average position
-    if cedges_ending_count >= 2:
-        virtual_pos = average_position(nodes, node_coords)
-        if virtual_pos is None:
-            # Fallback: use first valid node's position
+    for ce_idx in connected_cedges:
+        ce_dir = c_edges[ce_idx]['direction_deg']
+        
+        assigned = False
+        for i, rep_dir in enumerate(group_representatives):
+            if angular_delta_mod180(ce_dir, rep_dir) < parallel_angle_threshold:
+                direction_groups[i].append(ce_idx)
+                assigned = True
+                break
+        
+        if not assigned:
+            direction_groups.append([ce_idx])
+            group_representatives.append(ce_dir)
+    
+    num_groups = len(direction_groups)
+    
+    # Helper to get average position with fallback
+    def get_avg_pos():
+        avg_pos = average_position(nodes, node_coords)
+        if avg_pos is None:
             for node in nodes:
                 if node in node_coords:
-                    virtual_pos = node_coords[node]
-                    break
-    else:
-        # Use direction-based logic
-        # Compute unique directions (rounded to 1°)
-        directions = set()
-        for ce_idx in connected_cedges:
-            directions.add(round(c_edges[ce_idx]['direction_deg']))
-        
-        # Compute position based on number of directions
-        if len(directions) == 1:
-            # 1 direction: average position, project to line
-            avg_pos = average_position(nodes, node_coords)
-            if avg_pos is None:
-                # Fallback: use first valid node's position
-                for node in nodes:
-                    if node in node_coords:
-                        avg_pos = node_coords[node]
-                        break
-            # Use first C-edge to define the line
-            ce_idx = list(connected_cedges)[0]
-            ce = c_edges[ce_idx]
-            virtual_pos = project_to_line(avg_pos, ce['start_coord'], ce['end_coord'])
-        elif len(directions) == 2:
-            # 2 directions: check if they are too similar (nearly parallel)
-            dir_list = sorted(directions)
-            angle_diff = angular_delta_mod180(dir_list[0], dir_list[1])
-            
-            if angle_diff < 5.0:
-                # Nearly parallel lines with different endpoints, use average position
-                # to avoid extremely far intersections
-                virtual_pos = average_position(nodes, node_coords)
-                if virtual_pos is None:
-                    # Fallback: use first valid node's position
-                    for node in nodes:
-                        if node in node_coords:
-                            virtual_pos = node_coords[node]
-                            break
-            else:
-                # Compute intersection
-                ce1 = next(
-                    ce
-                    for ce in connected_cedges
-                    if round(c_edges[ce]['direction_deg']) == dir_list[0]
-                )
-                ce2 = next(
-                    ce
-                    for ce in connected_cedges
-                    if round(c_edges[ce]['direction_deg']) == dir_list[1]
-                )
-                virtual_pos = line_intersection_2d(
-                    c_edges[ce1]['start_coord'],
-                    c_edges[ce1]['end_coord'],
-                    c_edges[ce2]['start_coord'],
-                    c_edges[ce2]['end_coord'],
-                )
-                if virtual_pos is None:
-                    # Parallel lines (shouldn't happen with 2 different directions), use average
-                    virtual_pos = average_position(nodes, node_coords)
-                    if virtual_pos is None:
-                        # Fallback: use first valid node's position
-                        for node in nodes:
-                            if node in node_coords:
-                                virtual_pos = node_coords[node]
-                                break
-                else:
-                    # Validate intersection is within geometric extent of at least one C-edge
-                    ce1_start_proj = project_to_bearing_m(c_edges[ce1]['start_coord'], c_edges[ce1]['start_coord'], c_edges[ce1]['direction_deg'])
-                    ce1_end_proj = project_to_bearing_m(c_edges[ce1]['end_coord'], c_edges[ce1]['start_coord'], c_edges[ce1]['direction_deg'])
-                    ce1_min_proj = min(ce1_start_proj, ce1_end_proj)
-                    ce1_max_proj = max(ce1_start_proj, ce1_end_proj)
-                    
-                    ce2_start_proj = project_to_bearing_m(c_edges[ce2]['start_coord'], c_edges[ce2]['start_coord'], c_edges[ce2]['direction_deg'])
-                    ce2_end_proj = project_to_bearing_m(c_edges[ce2]['end_coord'], c_edges[ce2]['start_coord'], c_edges[ce2]['direction_deg'])
-                    ce2_min_proj = min(ce2_start_proj, ce2_end_proj)
-                    ce2_max_proj = max(ce2_start_proj, ce2_end_proj)
-                    
-                    intersection_proj_ce1 = project_to_bearing_m(virtual_pos, c_edges[ce1]['start_coord'], c_edges[ce1]['direction_deg'])
-                    intersection_proj_ce2 = project_to_bearing_m(virtual_pos, c_edges[ce2]['start_coord'], c_edges[ce2]['direction_deg'])
-                    
-                    in_range_ce1 = ce1_min_proj <= intersection_proj_ce1 <= ce1_max_proj
-                    in_range_ce2 = ce2_min_proj <= intersection_proj_ce2 <= ce2_max_proj
-                    
-                    if not (in_range_ce1 or in_range_ce2):
-                        # Intersection out of range for both C-edges, use average position
-                        virtual_pos = average_position(nodes, node_coords)
-                        if virtual_pos is None:
-                            # Fallback: use first valid node's position
-                            for node in nodes:
-                                if node in node_coords:
-                                    virtual_pos = node_coords[node]
-                                    break
-        else:
-            # 3+ directions: average position
-            # TODO: improve with better algorithm (e.g., weighted by C-edge importance)
-            virtual_pos = average_position(nodes, node_coords)
-            if virtual_pos is None:
-                # Fallback: use first valid node's position
-                for node in nodes:
-                    if node in node_coords:
-                        virtual_pos = node_coords[node]
-                        break
+                    return node_coords[node]
+        return avg_pos
     
-    return virtual_pos
+    # Helper to project to nearest C-edge
+    def project_to_nearest(pos):
+        if pos is None:
+            pos = get_avg_pos()
+        if pos is None:
+            return None
+        min_dist = float('inf')
+        best_proj = pos
+        for ce_idx in connected_cedges:
+            ce = c_edges[ce_idx]
+            proj = project_to_line(pos, ce['start_coord'], ce['end_coord'])
+            dist = haversine_m(pos, proj)
+            if dist < min_dist:
+                min_dist = dist
+                best_proj = proj
+        return best_proj
+    
+    # Helper to validate intersection is within reasonable distance
+    def validate_intersection(intersection, ce1_idx, ce2_idx):
+        ce1 = c_edges[ce1_idx]
+        ce2 = c_edges[ce2_idx]
+        
+        ce1_start_proj = project_to_bearing_m(ce1['start_coord'], ce1['start_coord'], ce1['direction_deg'])
+        ce1_end_proj = project_to_bearing_m(ce1['end_coord'], ce1['start_coord'], ce1['direction_deg'])
+        ce1_min = min(ce1_start_proj, ce1_end_proj)
+        ce1_max = max(ce1_start_proj, ce1_end_proj)
+        
+        ce2_start_proj = project_to_bearing_m(ce2['start_coord'], ce2['start_coord'], ce2['direction_deg'])
+        ce2_end_proj = project_to_bearing_m(ce2['end_coord'], ce2['start_coord'], ce2['direction_deg'])
+        ce2_min = min(ce2_start_proj, ce2_end_proj)
+        ce2_max = max(ce2_start_proj, ce2_end_proj)
+        
+        int_proj_ce1 = project_to_bearing_m(intersection, ce1['start_coord'], ce1['direction_deg'])
+        int_proj_ce2 = project_to_bearing_m(intersection, ce2['start_coord'], ce2['direction_deg'])
+        
+        # Relaxed validation: allow within near_threshold_m beyond extent
+        in_range_ce1 = (ce1_min - near_threshold_m) <= int_proj_ce1 <= (ce1_max + near_threshold_m)
+        in_range_ce2 = (ce2_min - near_threshold_m) <= int_proj_ce2 <= (ce2_max + near_threshold_m)
+        
+        return in_range_ce1 or in_range_ce2
+    
+    if num_groups == 1:
+        # All C-edges parallel: project average position onto the line
+        avg_pos = get_avg_pos()
+        ce_idx = direction_groups[0][0]
+        ce = c_edges[ce_idx]
+        return project_to_line(avg_pos, ce['start_coord'], ce['end_coord'])
+    
+    elif num_groups == 2:
+        # Two non-parallel groups: compute intersection
+        ce1_idx = direction_groups[0][0]
+        ce2_idx = direction_groups[1][0]
+        ce1 = c_edges[ce1_idx]
+        ce2 = c_edges[ce2_idx]
+        
+        intersection = line_intersection_2d(
+            ce1['start_coord'], ce1['end_coord'],
+            ce2['start_coord'], ce2['end_coord'],
+        )
+        
+        if intersection is None:
+            return project_to_nearest(get_avg_pos())
+        
+        if validate_intersection(intersection, ce1_idx, ce2_idx):
+            return intersection
+        else:
+            return project_to_nearest(get_avg_pos())
+    
+    else:
+        # 3+ non-parallel groups: compute cross-group intersections and average
+        intersections = []
+        
+        for i in range(num_groups):
+            for j in range(i + 1, num_groups):
+                ce1_idx = direction_groups[i][0]
+                ce2_idx = direction_groups[j][0]
+                ce1 = c_edges[ce1_idx]
+                ce2 = c_edges[ce2_idx]
+                
+                intersection = line_intersection_2d(
+                    ce1['start_coord'], ce1['end_coord'],
+                    ce2['start_coord'], ce2['end_coord'],
+                )
+                
+                if intersection is not None:
+                    if validate_intersection(intersection, ce1_idx, ce2_idx):
+                        intersections.append(intersection)
+        
+        if intersections:
+            avg_lon = sum(p[0] for p in intersections) / len(intersections)
+            avg_lat = sum(p[1] for p in intersections) / len(intersections)
+            return (avg_lon, avg_lat)
+        else:
+            return project_to_nearest(get_avg_pos())
 
 
 def create_virtual_cnodes(
@@ -1416,6 +1429,7 @@ def create_virtual_cnodes(
     core_edges: Dict[int, set],
     edge_features: List[Dict[str, Any]],
     near_threshold_m: float = 50.0,
+    parallel_angle_threshold: float = 15.0,
 ) -> Dict[int, Dict[str, Any]]:
     """Create virtual C-nodes at strategic positions.
 
@@ -1428,6 +1442,7 @@ def create_virtual_cnodes(
         core_edges: Dict mapping C-edge index to set of core edge indices.
         edge_features: List of edge GeoJSON features.
         near_threshold_m: Distance threshold in meters for endpoint relaxation (default 50.0).
+        parallel_angle_threshold: Angle threshold for grouping parallel C-edges (default 15.0).
 
     Returns:
         Dict mapping cluster_id to virtual C-node info:
@@ -1492,6 +1507,28 @@ def create_virtual_cnodes(
                 if node in end_end_nodes:
                     c_edge_end_associations.add((ce_idx, 'end'))
 
+        # Geometric fallback: for C-edges without end associations, check if cluster is near an endpoint
+        cedges_with_association = set(ce_idx for ce_idx, _ in c_edge_end_associations)
+        avg_pos = average_position(nodes, node_coords)
+        if avg_pos is None:
+            for node in nodes:
+                if node in node_coords:
+                    avg_pos = node_coords[node]
+                    break
+        
+        if avg_pos is not None:
+            for ce_idx in connected_cedges:
+                if ce_idx in cedges_with_association:
+                    continue
+                ce = c_edges[ce_idx]
+                dist_to_start = haversine_m(avg_pos, ce['start_coord'])
+                dist_to_end = haversine_m(avg_pos, ce['end_coord'])
+                
+                if dist_to_start <= near_threshold_m:
+                    c_edge_end_associations.add((ce_idx, 'start'))
+                elif dist_to_end <= near_threshold_m:
+                    c_edge_end_associations.add((ce_idx, 'end'))
+
         # Count how many C-edges actually end at this cluster
         cedges_ending_here = set(ce_idx for ce_idx, _ in c_edge_end_associations)
         cedges_ending_count = len(cedges_ending_here)
@@ -1499,7 +1536,8 @@ def create_virtual_cnodes(
         # Compute position using helper function
         virtual_pos = _compute_cnode_position(
             nodes, connected_cedges, c_edge_end_associations, c_edges, node_coords,
-            near_threshold_m=near_threshold_m
+            near_threshold_m=near_threshold_m,
+            parallel_angle_threshold=parallel_angle_threshold
         )
 
         virtual_cnodes[cluster_id] = {
@@ -1574,7 +1612,8 @@ def create_virtual_cnodes(
             # Merged: re-compute position using the same logic
             virtual_pos = _compute_cnode_position(
                 all_nodes, all_connected_cedges, all_c_edge_end_associations,
-                c_edges, node_coords, near_threshold_m=near_threshold_m
+                c_edges, node_coords, near_threshold_m=near_threshold_m,
+                parallel_angle_threshold=parallel_angle_threshold
             )
         
         new_virtual_cnodes[new_id] = {

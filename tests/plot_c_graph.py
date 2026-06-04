@@ -155,6 +155,7 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
     hover_lons = []
     hover_lats = []
     hover_texts = []
+    label_texts = []
 
     for ce in c_edges:
         # Skip original C-edges that have been split
@@ -177,12 +178,18 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
         
         hover_text = f"{label}<br>Size: {ce['size']} edges<br>Direction: {ce['direction_deg']:.1f}°"
         
-        # Add midpoint for hover
+        # Add midpoint for hover and label
         mid_lon = (start[0] + end[0]) / 2
         mid_lat = (start[1] + end[1]) / 2
         hover_lons.append(mid_lon)
         hover_lats.append(mid_lat)
         hover_texts.append(hover_text)
+        
+        # Add edge index label
+        if 'split_idx' in ce:
+            label_texts.append(f"{parent_idx}-{ce['split_idx']}")
+        else:
+            label_texts.append(str(parent_idx))
 
     # Single trace for all C-edges
     traces.append(go.Scattermap(
@@ -194,13 +201,16 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
         hoverinfo="skip",
     ))
 
-    # Invisible hover markers at midpoints
+    # Midpoint labels with hover
     if hover_lons:
         traces.append(go.Scattermap(
             lon=hover_lons,
             lat=hover_lats,
-            mode="markers",
+            mode="markers+text",
             marker=dict(size=1, opacity=0),
+            text=label_texts,
+            textposition="middle center",
+            textfont=dict(size=10, color="#222222"),
             hovertext=hover_texts,
             hoverinfo="text",
             showlegend=False,
@@ -301,7 +311,8 @@ def plot_c_edge_graph(
     virtual_cnodes = create_virtual_cnodes(
         clusters, connection_nodes, c_edges, node_coords,
         edge_clusters, core_edges, edge_features,
-        near_threshold_m=near_threshold_m
+        near_threshold_m=near_threshold_m,
+        parallel_angle_threshold=parallel_angle_threshold
     )
     print(f"Virtual C-nodes: {len(virtual_cnodes)}")
 
