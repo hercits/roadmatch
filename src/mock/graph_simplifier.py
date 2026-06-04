@@ -974,6 +974,153 @@ def build_node_to_cedges_map(
     return node_to_cedges
 
 
+def filter_spur_core_edges(
+    core_edges_per_cluster: Dict[int, set],
+    edge_clusters: List[List[int]],
+    edge_features: List[Dict[str, Any]],
+) -> Dict[int, set]:
+    """Filter out spur core edges (edges where both endpoints only belong to current C-edge).
+
+    Spur edges are branches that don't connect to other C-edges. Removing them
+    improves C-edge geometry by eliminating directional bias from spurs.
+
+    Args:
+        core_edges_per_cluster: Dict mapping cluster index to set of core edge indices.
+        edge_clusters: List of edge index lists for each C-edge.
+        edge_features: Original edge GeoJSON features.
+
+    Returns:
+        Filtered core_edges_per_cluster with spur edges removed.
+    """
+    node_to_cedges: Dict[str, set] = {}
+    for ce_idx, cluster in enumerate(edge_clusters):
+        for edge_idx in cluster:
+            props = edge_features[edge_idx]['properties']
+            u = props['u']
+            v = props['v']
+
+            if u not in node_to_cedges:
+                node_to_cedges[u] = set()
+            node_to_cedges[u].add(ce_idx)
+
+            if v not in node_to_cedges:
+                node_to_cedges[v] = set()
+            node_to_cedges[v].add(ce_idx)
+
+    filtered_core_edges = {}
+    for ce_idx, core_edges in core_edges_per_cluster.items():
+        filtered = set()
+        for edge_idx in core_edges:
+            edge = edge_features[edge_idx]
+            u = edge['properties']['u']
+            v = edge['properties']['v']
+
+            u_cedges = node_to_cedges.get(u, set())
+            v_cedges = node_to_cedges.get(v, set())
+
+            u_shared = len(u_cedges) > 1
+            v_shared = len(v_cedges) > 1
+
+            if not (u_shared or v_shared):
+                continue
+
+            filtered.add(edge_idx)
+
+        if not filtered:
+            filtered = core_edges
+
+        filtered_core_edges[ce_idx] = filtered
+
+    return filtered_core_edges
+
+
+def recompute_c_edge_geometry(
+    c_edges: List[Dict[str, Any]],
+    core_edges_per_cluster: Dict[int, set],
+    edge_clusters: List[List[int]],
+    edge_features: List[Dict[str, Any]],
+    node_coords: Dict[str, tuple],
+    near_threshold_m: float = 50.0,
+) -> None:
+    """Recompute C-edge geometry using filtered core edges.
+
+    Updates c_edges in-place with new direction, start_coord, end_coord.
+
+    Args:
+        c_edges: List of C-edge dicts (modified in-place).
+        core_edges_per_cluster: Dict mapping cluster index to set of core edge indices.
+        edge_clusters: List of edge index lists for each C-edge.
+        edge_features: Original edge GeoJSON features.
+        node_coords: Dict of node_id -> (lon, lat).
+        near_threshold_m: Near threshold used for edge clustering (default 50m).
+    """
+    from utils.liquid import (
+        auto_utm_epsg,
+        centroid_to_geo,
+        liquidify_lines,
+    )
+
+    center = get_bounds_center(edge_features)
+    utm_epsg = auto_utm_epsg(center[0], center[1])
+    edge_buffer_radius_m = near_threshold_m / 2.0
+
+    for ce_idx, c_edge in enumerate(c_edges):
+        core = core_edges_per_cluster.get(ce_idx, set(edge_clusters[ce_idx]))
+
+        levels = {idx: _edge_highway_level(edge_features[idx]) for idx in core}
+        min_level = min(levels.values()) if levels else 99
+        priority_core = {idx for idx, lvl in levels.items() if lvl == min_level}
+        if not priority_core:
+            priority_core = core
+
+        core_directions = [edge_features[idx]['properties']['direction_deg'] for idx in priority_core]
+        major_dir = median_direction_mod180(core_directions)
+
+        core_line_coords = [
+            edge_features[edge_idx]['geometry']['coordinates']
+            for edge_idx in priority_core
+        ]
+
+        if not core_line_coords:
+            core_line_coords = [
+                edge_features[edge_idx]['geometry']['coordinates']
+                for edge_idx in edge_clusters[ce_idx]
+            ]
+
+        liquid_shape = liquidify_lines(core_line_coords, edge_buffer_radius_m, utm_epsg)
+        origin = centroid_to_geo(liquid_shape, utm_epsg)
+
+        t_values: List[float] = []
+        for edge_idx in core:
+            coords = edge_features[edge_idx]['geometry']['coordinates']
+            p1 = (coords[0][0], coords[0][1])
+            p2 = (coords[-1][0], coords[-1][1])
+
+            t1 = project_to_bearing_m(p1, origin, major_dir)
+            t2 = project_to_bearing_m(p2, origin, major_dir)
+            t_values.extend([t1, t2])
+
+        if not t_values:
+            for edge_idx in edge_clusters[ce_idx]:
+                coords = edge_features[edge_idx]['geometry']['coordinates']
+                p1 = (coords[0][0], coords[0][1])
+                p2 = (coords[-1][0], coords[-1][1])
+
+                t1 = project_to_bearing_m(p1, origin, major_dir)
+                t2 = project_to_bearing_m(p2, origin, major_dir)
+                t_values.extend([t1, t2])
+
+        t_min = min(t_values)
+        t_max = max(t_values)
+
+        start_coord = offset_to_coordinate(origin, major_dir, t_min, 0.0)
+        end_coord = offset_to_coordinate(origin, major_dir, t_max, 0.0)
+
+        c_edge['direction_deg'] = major_dir
+        c_edge['start_coord'] = start_coord
+        c_edge['end_coord'] = end_coord
+
+
 def identify_connection_nodes(node_to_cedges: Dict[str, set]) -> Dict[str, set]:
     """Identify nodes that belong to 2+ C-edges.
 
@@ -1596,7 +1743,7 @@ def create_virtual_cnodes(
 
     # Create new virtual C-nodes for merged clusters
     new_virtual_cnodes = {}
-    for new_id, (root, old_cluster_ids) in enumerate(merged_clusters.items()):
+    for new_id, (root, old_cluster_ids) in enumerate(sorted(merged_clusters.items())):
         # Combine all nodes from merged clusters
         all_nodes = []
         all_connected_cedges = set()

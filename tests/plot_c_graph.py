@@ -30,8 +30,10 @@ from mock.graph_simplifier import (
     compute_crossroad_positions,
     connect_shared_nodes,
     create_virtual_cnodes,
+    filter_spur_core_edges,
     find_crossroad_nodes,
     identify_connection_nodes,
+    recompute_c_edge_geometry,
     split_c_edges_at_intersection_nodes,
     update_c_edge_endpoints,
     update_c_edges_for_crossroads,
@@ -295,6 +297,11 @@ def plot_c_edge_graph(
     # Build node-to-C-edges mapping
     print("Building node-to-C-edges mapping...")
     node_to_cedges = build_node_to_cedges_map(c_edges, edge_clusters, edge_features)
+
+    # Filter spur core edges and recompute geometry
+    print("Filtering spur core edges...")
+    core_edges = filter_spur_core_edges(core_edges, edge_clusters, edge_features)
+    recompute_c_edge_geometry(c_edges, core_edges, edge_clusters, edge_features, node_coords, near_threshold_m)
 
     # Identify connection nodes
     print("Identifying connection nodes...")
