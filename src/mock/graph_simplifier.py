@@ -1162,6 +1162,13 @@ def identify_endpoint_nodes_for_cedge(
 
     # Identify endpoint nodes
     endpoint_nodes = set()
+    
+    # Special case: always include start_node_id and end_node_id
+    ce = c_edges[c_edge_idx]
+    if ce.get('start_node_id') and ce['start_node_id'] in node_coords:
+        endpoint_nodes.add(ce['start_node_id'])
+    if ce.get('end_node_id') and ce['end_node_id'] in node_coords:
+        endpoint_nodes.add(ce['end_node_id'])
 
     for node in all_nodes:
         # Skip nodes that don't exist in node_coords
@@ -1625,17 +1632,24 @@ def split_c_edges_at_intersection_nodes(
             vnode = virtual_cnodes[vnode_id]
             is_endpoint = False
 
-            # Check if connected to at least one parallel C-edge
-            for other_ce_idx in vnode['connected_cedges']:
-                if other_ce_idx == ce_idx:
-                    continue
-                angle_diff = angular_delta_mod180(
-                    c_edge['direction_deg'],
-                    c_edges[other_ce_idx]['direction_deg']
-                )
-                if angle_diff < parallel_angle_threshold:
+            # Check if this C-node is an endpoint of the current C-edge
+            for (ce_idx, end_type) in vnode.get('c_edge_end_associations', set()):
+                if ce_idx == ce_idx:
                     is_endpoint = True
                     break
+
+            # Check if connected to at least one parallel C-edge
+            if not is_endpoint:
+                for other_ce_idx in vnode['connected_cedges']:
+                    if other_ce_idx == ce_idx:
+                        continue
+                    angle_diff = angular_delta_mod180(
+                        c_edge['direction_deg'],
+                        c_edges[other_ce_idx]['direction_deg']
+                    )
+                    if angle_diff < parallel_angle_threshold:
+                        is_endpoint = True
+                        break
 
             if is_endpoint:
                 endpoint_vnodes.append(vnode_id)
