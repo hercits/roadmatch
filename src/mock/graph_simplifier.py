@@ -1258,6 +1258,7 @@ def _compute_cnode_position(
     c_edge_end_associations: set,
     c_edges: List[Dict[str, Any]],
     node_coords: Dict[str, tuple],
+    near_threshold_m: float = 50.0,
 ) -> tuple:
     """Compute C-node position based on connected C-edges and end associations.
     
@@ -1267,6 +1268,7 @@ def _compute_cnode_position(
         c_edge_end_associations: Set of (ce_idx, end_type) tuples.
         c_edges: List of C-edge dicts.
         node_coords: Dict of node_id -> (lon, lat).
+        near_threshold_m: Distance threshold for intersection validation (default 50.0).
     
     Returns:
         Computed position (lon, lat).
@@ -1347,6 +1349,14 @@ def _compute_cnode_position(
                             if node in node_coords:
                                 virtual_pos = node_coords[node]
                                 break
+                else:
+                    # Validate intersection distance to original nodes
+                    avg_pos = average_position(nodes, node_coords)
+                    if avg_pos is not None:
+                        dist_to_avg = haversine_m(virtual_pos, avg_pos)
+                        if dist_to_avg > near_threshold_m:
+                            # Intersection too far, use average position instead
+                            virtual_pos = avg_pos
         else:
             # 3+ directions: average position
             # TODO: improve with better algorithm (e.g., weighted by C-edge importance)
@@ -1452,7 +1462,8 @@ def create_virtual_cnodes(
         
         # Compute position using helper function
         virtual_pos = _compute_cnode_position(
-            nodes, connected_cedges, c_edge_end_associations, c_edges, node_coords
+            nodes, connected_cedges, c_edge_end_associations, c_edges, node_coords,
+            near_threshold_m=near_threshold_m
         )
 
         virtual_cnodes[cluster_id] = {
@@ -1527,7 +1538,7 @@ def create_virtual_cnodes(
             # Merged: re-compute position using the same logic
             virtual_pos = _compute_cnode_position(
                 all_nodes, all_connected_cedges, all_c_edge_end_associations,
-                c_edges, node_coords
+                c_edges, node_coords, near_threshold_m=near_threshold_m
             )
         
         new_virtual_cnodes[new_id] = {
