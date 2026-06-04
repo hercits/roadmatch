@@ -1781,6 +1781,86 @@ def create_virtual_cnodes(
     return new_virtual_cnodes
 
 
+def merge_t_junction_cnodes(
+    virtual_cnodes: Dict[int, Dict[str, Any]],
+    near_threshold_m: float = 50.0,
+) -> Dict[int, Dict[str, Any]]:
+    """Merge T-junction C-nodes into their corresponding endpoint C-nodes.
+
+    A T-junction occurs when two C-nodes share a C-edge, but one connects to
+    the endpoint (has end association) while the other connects to the middle
+    (no end association). These C-nodes are geometrically close but not merged
+    by the standard merge logic.
+
+    This function identifies such pairs and merges the T-junction C-node into
+    the endpoint C-node, transferring its unique C-edges and associations.
+
+    Args:
+        virtual_cnodes: Dict from create_virtual_cnodes().
+        near_threshold_m: Distance threshold for considering C-nodes as close (default 50.0).
+
+    Returns:
+        Updated dict of virtual C-nodes with T-junctions merged and re-numbered.
+    """
+    cedge_to_cnodes: Dict[int, List[int]] = {}
+    for cn_id, vnode in virtual_cnodes.items():
+        for ce_idx in vnode['connected_cedges']:
+            if ce_idx not in cedge_to_cnodes:
+                cedge_to_cnodes[ce_idx] = []
+            cedge_to_cnodes[ce_idx].append(cn_id)
+
+    to_delete = set()
+
+    for ce_idx, cn_list in cedge_to_cnodes.items():
+        for i in range(len(cn_list)):
+            for j in range(i + 1, len(cn_list)):
+                cn1_id, cn2_id = cn_list[i], cn_list[j]
+                if cn1_id in to_delete or cn2_id in to_delete:
+                    continue
+
+                cn1 = virtual_cnodes[cn1_id]
+                cn2 = virtual_cnodes[cn2_id]
+
+                dist = haversine_m(cn1['position'], cn2['position'])
+                if dist >= near_threshold_m:
+                    continue
+
+                shared = cn1['connected_cedges'] & cn2['connected_cedges']
+                if not shared:
+                    continue
+
+                for ce in shared:
+                    cn1_has = any(c == ce for c, _ in cn1['c_edge_end_associations'])
+                    cn2_has = any(c == ce for c, _ in cn2['c_edge_end_associations'])
+
+                    if cn1_has and not cn2_has:
+                        ep_cn, tj_cn = cn1_id, cn2_id
+                    elif cn2_has and not cn1_has:
+                        ep_cn, tj_cn = cn2_id, cn1_id
+                    else:
+                        continue
+
+                    ep_vnode = virtual_cnodes[ep_cn]
+                    tj_vnode = virtual_cnodes[tj_cn]
+
+                    ep_vnode['connected_cedges'].update(tj_vnode['connected_cedges'])
+                    ep_vnode['c_edge_end_associations'].update(tj_vnode['c_edge_end_associations'])
+                    ep_vnode['original_nodes'] = list(set(ep_vnode['original_nodes'] + tj_vnode['original_nodes']))
+
+                    to_delete.add(tj_cn)
+                    break
+
+    for cn_id in to_delete:
+        del virtual_cnodes[cn_id]
+
+    new_cnodes: Dict[int, Dict[str, Any]] = {}
+    for new_id, (old_id, vnode) in enumerate(sorted(virtual_cnodes.items())):
+        vnode['id'] = f'C-node_{new_id}'
+        new_cnodes[new_id] = vnode
+
+    return new_cnodes
+
+
 def split_c_edges_at_intersection_nodes(
     c_edges: List[Dict[str, Any]],
     virtual_cnodes: Dict[int, Dict[str, Any]],

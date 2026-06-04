@@ -33,6 +33,7 @@ from mock.graph_simplifier import (
     filter_spur_core_edges,
     find_crossroad_nodes,
     identify_connection_nodes,
+    merge_t_junction_cnodes,
     recompute_c_edge_geometry,
     split_c_edges_at_intersection_nodes,
     update_c_edge_endpoints,
@@ -322,6 +323,11 @@ def plot_c_edge_graph(
         parallel_angle_threshold=parallel_angle_threshold
     )
     print(f"Virtual C-nodes: {len(virtual_cnodes)}")
+
+    # Merge T-junction C-nodes
+    print("Merging T-junction C-nodes...")
+    virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, near_threshold_m=near_threshold_m)
+    print(f"Virtual C-nodes after merge: {len(virtual_cnodes)}")
 
     # Update C-edge endpoints
     print("Updating C-edge endpoints...")
