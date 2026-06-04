@@ -219,12 +219,16 @@ def _split_edge_at_points(
     new_edges: List[Dict[str, Any]] = []
     original_edge_id = edge_feature['properties']['edge_id']
 
-    # Add start point (0.0) and end point (1.0)
-    split_distances = [0.0] + [d for d, _ in points_with_dist] + [1.0]
+    # Build list of split points with their exact coordinates
+    # Format: (normalized_distance, coordinate)
+    split_points = [(0.0, round_coordinate(coords[0]))]
+    for dist, point in points_with_dist:
+        split_points.append((dist, round_coordinate(point)))
+    split_points.append((1.0, round_coordinate(coords[-1])))
 
-    for seg_idx in range(len(split_distances) - 1):
-        start_dist = split_distances[seg_idx]
-        end_dist = split_distances[seg_idx + 1]
+    for seg_idx in range(len(split_points) - 1):
+        start_dist, start_coord = split_points[seg_idx]
+        end_dist, end_coord = split_points[seg_idx + 1]
 
         # Extract segment
         segment = substring(line, start_dist, end_dist, normalized=True)
@@ -232,6 +236,10 @@ def _split_edge_at_points(
 
         if len(segment_coords) < 2:
             continue
+
+        # Replace first and last coordinates with exact split points
+        segment_coords[0] = start_coord
+        segment_coords[-1] = end_coord
 
         # Create edge segment
         new_edge = _create_edge_segment(

@@ -1006,49 +1006,59 @@ def cluster_connection_nodes(
     Returns:
         List of clusters, each cluster is a list of node_ids.
     """
-    # Stage 1: Basic clusters by C-edge pairs
-    pair_clusters = []
-    cedge_list = list(set(ce for cedges in connection_nodes.values() for ce in cedges))
-
-    for i, ce1 in enumerate(cedge_list):
-        for ce2 in cedge_list[i + 1:]:
-            # Find shared nodes between ce1 and ce2
-            shared = [
-                node
-                for node, cedges in connection_nodes.items()
-                if ce1 in cedges and ce2 in cedges
-            ]
-            if shared:
-                pair_clusters.append(set(shared))
+    # Stage 1: Build clusters by grouping nodes by their C-edge combinations
+    # This is much faster than checking all C-edge pairs
+    
+    # Group nodes by their C-edge set (as a frozenset for hashing)
+    cedge_to_nodes: Dict[frozenset, List[str]] = {}
+    for node, cedges in connection_nodes.items():
+        key = frozenset(cedges)
+        if key not in cedge_to_nodes:
+            cedge_to_nodes[key] = []
+        cedge_to_nodes[key].append(node)
+    
+    # Each group of nodes sharing the same C-edge set forms a cluster
+    pair_clusters = [set(nodes) for nodes in cedge_to_nodes.values() if len(nodes) > 0]
 
     # Stage 2: Merge clusters that share nodes (transitive closure)
-    merged = True
-    while merged:
-        merged = False
-        new_clusters = []
-        used = set()
-
-        for i, cluster1 in enumerate(pair_clusters):
-            if i in used:
-                continue
-
-            current = set(cluster1)
-            for j, cluster2 in enumerate(pair_clusters[i + 1:], start=i + 1):
-                if j in used:
-                    continue
-
-                if current & cluster2:  # Share at least one node
-                    current |= cluster2
-                    used.add(j)
-                    merged = True
-
-            new_clusters.append(current)
-            used.add(i)
-
-        pair_clusters = new_clusters
-
-    # Convert sets to lists and remove duplicates
-    return [list(cluster) for cluster in pair_clusters]
+    # Use Union-Find for efficiency
+    parent = list(range(len(pair_clusters)))
+    
+    def find(i: int) -> int:
+        if parent[i] != i:
+            parent[i] = find(parent[i])
+        return parent[i]
+    
+    def union(i: int, j: int) -> None:
+        root_i = find(i)
+        root_j = find(j)
+        if root_i != root_j:
+            parent[root_i] = root_j
+    
+    # Build mapping: node -> cluster indices
+    node_to_clusters: Dict[str, List[int]] = {}
+    for i, cluster in enumerate(pair_clusters):
+        for node in cluster:
+            if node not in node_to_clusters:
+                node_to_clusters[node] = []
+            node_to_clusters[node].append(i)
+    
+    # Merge clusters that share nodes
+    for node, cluster_indices in node_to_clusters.items():
+        if len(cluster_indices) > 1:
+            for i in range(1, len(cluster_indices)):
+                union(cluster_indices[0], cluster_indices[i])
+    
+    # Build merged clusters
+    merged_clusters: Dict[int, set] = {}
+    for i, cluster in enumerate(pair_clusters):
+        root = find(i)
+        if root not in merged_clusters:
+            merged_clusters[root] = set()
+        merged_clusters[root].update(cluster)
+    
+    # Convert sets to lists
+    return [list(cluster) for cluster in merged_clusters.values()]
 
 
 def average_position(nodes: List[str], node_coords: Dict[str, tuple]) -> tuple:
