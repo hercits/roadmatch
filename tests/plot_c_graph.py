@@ -101,9 +101,9 @@ def build_crossroad_trace(
         text=texts,
         textposition="top center",
         textfont=dict(size=10, color="#000000"),
-        name=f"Crossroads ({len(crossroad_nodes)})",
         hovertext=hover_texts,
         hoverinfo="text",
+        showlegend=False,
     )
 
 
@@ -132,69 +132,79 @@ def build_virtual_cnode_traces(virtual_cnodes: dict[int, dict]) -> go.Scattermap
         text=texts,
         textposition="top center",
         textfont=dict(size=9, color="#1d3557"),
-        name=f"Virtual C-nodes ({len(virtual_cnodes)})",
         hovertext=hover_texts,
         hoverinfo="text",
+        showlegend=False,
     )
 
 
 def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> list[go.Scattermap]:
+    """Build optimized traces for C-edges.
+    
+    Optimizations:
+    1. Batch rendering: merge all C-edges into single trace with None separators
+    2. Unified color: use single color instead of cycling
+    3. No legend: disable legend for C-edges
+    4. Midpoint hover: add invisible hover markers at edge midpoints
+    """
     traces: list[go.Scattermap] = []
+
+    # Batch render all C-edges in a single trace
+    all_lons = []
+    all_lats = []
+    hover_lons = []
+    hover_lats = []
+    hover_texts = []
 
     for ce in c_edges:
         # Skip original C-edges that have been split
         if ce.get('is_split', False):
             continue
 
-        # Use parent_idx for color assignment (so split pieces have the same color)
-        parent_idx = ce.get('parent_idx', ce['idx'])
-        color = _CLUSTER_COLORS[parent_idx % len(_CLUSTER_COLORS)]
         start = ce["start_coord"]
         end = ce["end_coord"]
 
-        lons = [start[0], end[0]]
-        lats = [start[1], end[1]]
+        # Add line segment with None separator
+        all_lons.extend([start[0], end[0], None])
+        all_lats.extend([start[1], end[1], None])
 
-        # Build label with split information
+        # Build hover text
+        parent_idx = ce.get('parent_idx', ce['idx'])
         if 'split_idx' in ce:
-            label = f"C-edge {parent_idx}-{ce['split_idx']} ({ce['size']} edges, dir={ce['direction_deg']:.1f}°)"
+            label = f"C-edge {parent_idx}-{ce['split_idx']}"
         else:
-            label = f"C-edge {parent_idx} ({ce['size']} edges, dir={ce['direction_deg']:.1f}°)"
+            label = f"C-edge {parent_idx}"
+        
+        hover_text = f"{label}<br>Size: {ce['size']} edges<br>Direction: {ce['direction_deg']:.1f}°"
+        
+        # Add midpoint for hover
+        mid_lon = (start[0] + end[0]) / 2
+        mid_lat = (start[1] + end[1]) / 2
+        hover_lons.append(mid_lon)
+        hover_lats.append(mid_lat)
+        hover_texts.append(hover_text)
 
-        traces.append(go.Scattermap(
-            lon=lons,
-            lat=lats,
-            mode="lines",
-            line=dict(width=3, color=color),
-            name=label,
-            hoverinfo="name",
-        ))
-
-    # Add C-edge labels at midpoints (only for non-split C-edges)
-    label_lons = []
-    label_lats = []
-    label_texts = []
-    for ce in c_edges:
-        if ce.get('is_split', False):
-            continue
-        label_lons.append((ce["start_coord"][0] + ce["end_coord"][0]) / 2)
-        label_lats.append((ce["start_coord"][1] + ce["end_coord"][1]) / 2)
-        if 'split_idx' in ce:
-            label_texts.append(f"{ce.get('parent_idx', ce['idx'])}-{ce['split_idx']}")
-        else:
-            label_texts.append(str(ce.get('parent_idx', ce['idx'])))
-
+    # Single trace for all C-edges
     traces.append(go.Scattermap(
-        lon=label_lons,
-        lat=label_lats,
-        mode="text",
-        text=label_texts,
-        textposition="middle center",
-        textfont=dict(size=11, color="#222222"),
-        name="C-edge labels",
-        hoverinfo="skip",
+        lon=all_lons,
+        lat=all_lats,
+        mode="lines",
+        line=dict(width=2, color="#1f77b4"),
         showlegend=False,
+        hoverinfo="skip",
     ))
+
+    # Invisible hover markers at midpoints
+    if hover_lons:
+        traces.append(go.Scattermap(
+            lon=hover_lons,
+            lat=hover_lats,
+            mode="markers",
+            marker=dict(size=1, opacity=0),
+            hovertext=hover_texts,
+            hoverinfo="text",
+            showlegend=False,
+        ))
 
     # Collect all endpoint nodes
     endpoint_nodes = set()
@@ -204,28 +214,24 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
         if ce["end_node_id"]:
             endpoint_nodes.add(ce["end_node_id"])
 
-    # Add endpoint node markers
+    # Add endpoint node markers (batch rendered)
     if endpoint_nodes:
         node_lons = []
         node_lats = []
-        node_texts = []
         for nid in endpoint_nodes:
             if nid in node_coords:
                 coord = node_coords[nid]
                 node_lons.append(coord[0])
                 node_lats.append(coord[1])
-                # Use short node ID (last part after underscore)
-                short_id = nid.split("_")[-1] if "_" in nid else nid
-                node_texts.append(short_id)
 
         if node_lons:
             traces.append(go.Scattermap(
                 lon=node_lons,
                 lat=node_lats,
                 mode="markers",
-                marker=dict(size=6, color="#333333"),
-                name=f"Endpoint nodes ({len(endpoint_nodes)})",
-                hoverinfo="name",
+                marker=dict(size=4, color="#333333"),
+                showlegend=False,
+                hoverinfo="skip",
             ))
 
     return traces
@@ -368,12 +374,7 @@ def plot_c_edge_graph(
         ),
         margin=dict(l=0, r=0, t=40, b=0),
         title=dict(text=title_text, x=0.5),
-        showlegend=True,
-        legend=dict(
-            y=0.99,
-            x=0.01,
-            font=dict(size=10),
-        ),
+        showlegend=False,
         dragmode="pan",
     )
 
