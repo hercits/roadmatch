@@ -1350,13 +1350,32 @@ def _compute_cnode_position(
                                 virtual_pos = node_coords[node]
                                 break
                 else:
-                    # Validate intersection distance to original nodes
-                    avg_pos = average_position(nodes, node_coords)
-                    if avg_pos is not None:
-                        dist_to_avg = haversine_m(virtual_pos, avg_pos)
-                        if dist_to_avg > near_threshold_m:
-                            # Intersection too far, use average position instead
-                            virtual_pos = avg_pos
+                    # Validate intersection is within geometric extent of at least one C-edge
+                    ce1_start_proj = project_to_bearing_m(c_edges[ce1]['start_coord'], c_edges[ce1]['start_coord'], c_edges[ce1]['direction_deg'])
+                    ce1_end_proj = project_to_bearing_m(c_edges[ce1]['end_coord'], c_edges[ce1]['start_coord'], c_edges[ce1]['direction_deg'])
+                    ce1_min_proj = min(ce1_start_proj, ce1_end_proj)
+                    ce1_max_proj = max(ce1_start_proj, ce1_end_proj)
+                    
+                    ce2_start_proj = project_to_bearing_m(c_edges[ce2]['start_coord'], c_edges[ce2]['start_coord'], c_edges[ce2]['direction_deg'])
+                    ce2_end_proj = project_to_bearing_m(c_edges[ce2]['end_coord'], c_edges[ce2]['start_coord'], c_edges[ce2]['direction_deg'])
+                    ce2_min_proj = min(ce2_start_proj, ce2_end_proj)
+                    ce2_max_proj = max(ce2_start_proj, ce2_end_proj)
+                    
+                    intersection_proj_ce1 = project_to_bearing_m(virtual_pos, c_edges[ce1]['start_coord'], c_edges[ce1]['direction_deg'])
+                    intersection_proj_ce2 = project_to_bearing_m(virtual_pos, c_edges[ce2]['start_coord'], c_edges[ce2]['direction_deg'])
+                    
+                    in_range_ce1 = ce1_min_proj <= intersection_proj_ce1 <= ce1_max_proj
+                    in_range_ce2 = ce2_min_proj <= intersection_proj_ce2 <= ce2_max_proj
+                    
+                    if not (in_range_ce1 or in_range_ce2):
+                        # Intersection out of range for both C-edges, use average position
+                        virtual_pos = average_position(nodes, node_coords)
+                        if virtual_pos is None:
+                            # Fallback: use first valid node's position
+                            for node in nodes:
+                                if node in node_coords:
+                                    virtual_pos = node_coords[node]
+                                    break
         else:
             # 3+ directions: average position
             # TODO: improve with better algorithm (e.g., weighted by C-edge importance)
