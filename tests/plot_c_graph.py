@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from mock.edge_splitter import split_edges_at_intersections
 from mock.graph_simplifier import (
-    align_parallel_c_edges,
     build_c_edge_graph,
     build_node_to_cedges_map,
     cluster_connection_nodes,
@@ -292,10 +291,6 @@ def plot_c_edge_graph(
         parallel_angle_threshold=parallel_angle_threshold
     )
     print(f"C-edges after splitting: {len(c_edges)}")
-
-    # Align parallel C-edges
-    print("Aligning parallel C-edges...")
-    align_parallel_c_edges(c_edges, parallel_angle_threshold)
 
     center = get_bounds_center(edge_features)
 
