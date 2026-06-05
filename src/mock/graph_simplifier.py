@@ -18,6 +18,7 @@ from utils.geometry import (
     project_point_to_line,
     project_to_bearing_m,
     segment_overlap_length_m,
+    signed_perpendicular_offset_m,
 )
 from utils.types import HIGHWAY_LEVEL
 
@@ -1137,10 +1138,30 @@ def create_virtual_cnodes(
                     continue
                 
                 # Filter: only consider endpoint nodes within near_threshold_m of geometric endpoints
+                # or near endpoint in projection direction (parabola check for extension)
                 dist_to_start = haversine_m(node_coords[ep_node], ce['start_coord'])
                 dist_to_end = haversine_m(node_coords[ep_node], ce['end_coord'])
                 if dist_to_start > near_threshold_m and dist_to_end > near_threshold_m:
-                    continue
+                    # Check if node is near endpoint in projection direction
+                    proj_ext = project_to_bearing_m(
+                        node_coords[ep_node], ce['start_coord'], ce['direction_deg'])
+                    perp = abs(signed_perpendicular_offset_m(
+                        node_coords[ep_node], ce['start_coord'], ce['direction_deg']))
+                    a = near_threshold_m
+                    # Distance along axis from each endpoint
+                    axis_dist_start = abs(proj_ext - start_proj)
+                    axis_dist_end = abs(proj_ext - end_proj)
+                    # Parabola check: perp² ≤ 4a·axis_dist
+                    # Allow if within parabola of either endpoint
+                    in_start_region = axis_dist_start <= near_threshold_m and perp * perp <= 4 * a * axis_dist_start
+                    in_end_region = axis_dist_end <= near_threshold_m and perp * perp <= 4 * a * axis_dist_end
+                    # Also allow if beyond endpoint (extension direction)
+                    start_ext = max(0.0, start_proj - proj_ext)
+                    end_ext = max(0.0, proj_ext - end_proj)
+                    in_start_parabola = start_ext > 0 and perp * perp <= 4 * a * start_ext
+                    in_end_parabola = end_ext > 0 and perp * perp <= 4 * a * end_ext
+                    if not (in_start_region or in_end_region or in_start_parabola or in_end_parabola):
+                        continue
                 
                 proj = project_to_bearing_m(node_coords[ep_node], ce['start_coord'], ce['direction_deg'])
                 if proj < mid_proj:
@@ -1183,10 +1204,34 @@ def create_virtual_cnodes(
                 mid_proj = (start_proj + end_proj) / 2
                 cluster_proj = project_to_bearing_m(avg_pos, ce['start_coord'], ce['direction_deg'])
                 
-                if cluster_proj < mid_proj and dist_to_start <= near_threshold_m:
-                    c_edge_end_associations.add((ce_idx, 'start'))
-                elif cluster_proj >= mid_proj and dist_to_end <= near_threshold_m:
-                    c_edge_end_associations.add((ce_idx, 'end'))
+                if cluster_proj < mid_proj:
+                    if dist_to_start <= near_threshold_m:
+                        c_edge_end_associations.add((ce_idx, 'start'))
+                    else:
+                        # Check parabola for start region/extension
+                        perp = abs(signed_perpendicular_offset_m(
+                            avg_pos, ce['start_coord'], ce['direction_deg']))
+                        a = near_threshold_m
+                        axis_dist_start = abs(cluster_proj - start_proj)
+                        in_start_region = axis_dist_start <= near_threshold_m and perp * perp <= 4 * a * axis_dist_start
+                        start_ext = max(0.0, start_proj - cluster_proj)
+                        in_start_parabola = start_ext > 0 and perp * perp <= 4 * a * start_ext
+                        if in_start_region or in_start_parabola:
+                            c_edge_end_associations.add((ce_idx, 'start'))
+                elif cluster_proj >= mid_proj:
+                    if dist_to_end <= near_threshold_m:
+                        c_edge_end_associations.add((ce_idx, 'end'))
+                    else:
+                        # Check parabola for end region/extension
+                        perp = abs(signed_perpendicular_offset_m(
+                            avg_pos, ce['start_coord'], ce['direction_deg']))
+                        a = near_threshold_m
+                        axis_dist_end = abs(cluster_proj - end_proj)
+                        in_end_region = axis_dist_end <= near_threshold_m and perp * perp <= 4 * a * axis_dist_end
+                        end_ext = max(0.0, cluster_proj - end_proj)
+                        in_end_parabola = end_ext > 0 and perp * perp <= 4 * a * end_ext
+                        if in_end_region or in_end_parabola:
+                            c_edge_end_associations.add((ce_idx, 'end'))
                 # else: T-junction (middle of C-edge), no association
 
         # Count how many C-edges actually end at this cluster
