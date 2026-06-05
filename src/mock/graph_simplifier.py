@@ -1916,8 +1916,8 @@ def split_c_edges_at_intersection_nodes(
             is_endpoint = False
 
             # Check if this C-node is an endpoint of the current C-edge
-            for (ce_idx, end_type) in vnode.get('c_edge_end_associations', set()):
-                if ce_idx == ce_idx:
+            for (assoc_ce_idx, end_type) in vnode.get('c_edge_end_associations', set()):
+                if assoc_ce_idx == ce_idx:
                     is_endpoint = True
                     break
 
