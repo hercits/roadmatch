@@ -1641,18 +1641,30 @@ def create_virtual_cnodes(
             for ep_node in ep_nodes:
                 if ep_node not in node_coords:
                     continue
+                
+                # Filter: only consider endpoint nodes within near_threshold_m of geometric endpoints
+                dist_to_start = haversine_m(node_coords[ep_node], ce['start_coord'])
+                dist_to_end = haversine_m(node_coords[ep_node], ce['end_coord'])
+                if dist_to_start > near_threshold_m and dist_to_end > near_threshold_m:
+                    continue
+                
                 proj = project_to_bearing_m(node_coords[ep_node], ce['start_coord'], ce['direction_deg'])
                 if proj < mid_proj:
                     start_end_nodes.add(ep_node)
                 else:
                     end_end_nodes.add(ep_node)
             
-            # Check if any cluster node is in start-end or end-end group
-            for node in nodes:
-                if node in start_end_nodes:
-                    c_edge_end_associations.add((ce_idx, 'start'))
-                if node in end_end_nodes:
-                    c_edge_end_associations.add((ce_idx, 'end'))
+            # Check if cluster nodes are exclusively on one side of the midpoint
+            # If nodes are on both sides (crossing midpoint), don't add association
+            # and let geometric fallback decide based on cluster average position
+            start_count = sum(1 for node in nodes if node in start_end_nodes)
+            end_count = sum(1 for node in nodes if node in end_end_nodes)
+            
+            if start_count > 0 and end_count == 0:
+                c_edge_end_associations.add((ce_idx, 'start'))
+            elif end_count > 0 and start_count == 0:
+                c_edge_end_associations.add((ce_idx, 'end'))
+            # If both start_count > 0 and end_count > 0, don't add association
 
         # Geometric fallback: for C-edges without end associations, check if cluster is near an endpoint
         cedges_with_association = set(ce_idx for ce_idx, _ in c_edge_end_associations)
