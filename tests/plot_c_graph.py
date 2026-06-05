@@ -25,19 +25,14 @@ from mock.graph_simplifier import (
     build_c_edge_graph,
     build_node_to_cedges_map,
     cluster_connection_nodes,
-    cluster_crossroad_nodes,
     cluster_near_parallel_edges,
-    compute_crossroad_positions,
-    connect_shared_nodes,
     create_virtual_cnodes,
     filter_spur_core_edges,
-    find_crossroad_nodes,
     identify_connection_nodes,
     merge_t_junction_cnodes,
     recompute_c_edge_geometry,
     split_c_edges_at_intersection_nodes,
     update_c_edge_endpoints,
-    update_c_edges_for_crossroads,
 )
 from utils.geometry import get_bounds_center
 
@@ -65,49 +60,6 @@ _CLUSTER_COLORS = [
     "#7209b7", "#3a0ca3", "#4361ee", "#4cc9f0", "#06d6a0",
     "#118ab2", "#073b4c", "#ffd166", "#ef476f", "#26547c",
 ]
-
-
-def build_crossroad_trace(
-    crossroad_nodes: dict[str, dict],
-    crossroad_positions: dict[str, tuple],
-    c_edges: list[dict]
-) -> go.Scattermap:
-    """Build trace for crossroad nodes with enlarged markers and numbers."""
-    lons, lats, texts, hover_texts = [], [], [], []
-    
-    # Sort by node_id for deterministic numbering
-    sorted_nodes = sorted(crossroad_nodes.items(), key=lambda x: x[0])
-    
-    for idx, (node_id, info) in enumerate(sorted_nodes):
-        if node_id in crossroad_positions:
-            coord = crossroad_positions[node_id]
-            lons.append(coord[0])
-            lats.append(coord[1])
-            texts.append(str(idx))  # Sequential number label
-            
-            # Build hover text with C-edge details
-            ce_details = []
-            for ce_idx in info['c_edges']:
-                ce = c_edges[ce_idx]
-                ce_details.append(f"C{ce_idx}({ce['direction_deg']:.1f}°)")
-            
-            hover = f"Crossroad {idx}<br>"
-            hover += f"C-edges: {', '.join(ce_details)}<br>"
-            hover += f"Max angle diff: {info['max_angle_diff']:.1f}°"
-            hover_texts.append(hover)
-    
-    return go.Scattermap(
-        lon=lons,
-        lat=lats,
-        mode="markers+text",
-        marker=dict(size=12, color="#e63946", symbol="circle"),
-        text=texts,
-        textposition="top center",
-        textfont=dict(size=10, color="#000000"),
-        hovertext=hover_texts,
-        hoverinfo="text",
-        showlegend=False,
-    )
 
 
 def build_virtual_cnode_traces(virtual_cnodes: dict[int, dict]) -> go.Scattermap:
@@ -341,40 +293,9 @@ def plot_c_edge_graph(
     )
     print(f"C-edges after splitting: {len(c_edges)}")
 
-    print("Finding crossroad nodes...")
-    crossroad_nodes = find_crossroad_nodes(
-        c_edges, edge_clusters, edge_features,
-        parallel_angle_threshold=parallel_angle_threshold
-    )
-    print(f"Crossroad nodes: {len(crossroad_nodes)}")
-
-    # Compute intersection positions
-    print("Computing crossroad positions...")
-    crossroad_positions = compute_crossroad_positions(
-        crossroad_nodes, c_edges, node_coords,
-        parallel_angle_threshold=parallel_angle_threshold
-    )
-
-    # Cluster closely positioned crossroads
-    print("Clustering crossroad nodes...")
-    clustering_distance_m = overlap_length_threshold_m / 2
-    crossroad_positions = cluster_crossroad_nodes(
-        crossroad_positions, crossroad_nodes,
-        clustering_distance_m=clustering_distance_m
-    )
-
-    # Connect shared non-crossroad nodes
-    print("Connecting shared nodes...")
-    connect_shared_nodes(c_edges, edge_clusters, edge_features,
-                        node_coords, crossroad_nodes)
-
     # Align parallel C-edges
     print("Aligning parallel C-edges...")
     align_parallel_c_edges(c_edges, parallel_angle_threshold)
-
-    # Update C-edges to reach intersection points
-    print("Updating C-edges for crossroads...")
-    update_c_edges_for_crossroads(c_edges, crossroad_positions)
 
     center = get_bounds_center(edge_features)
 
@@ -383,11 +304,8 @@ def plot_c_edge_graph(
     # Add virtual C-node traces
     if virtual_cnodes:
         traces.append(build_virtual_cnode_traces(virtual_cnodes))
-    
-    if crossroad_nodes:
-        traces.append(build_crossroad_trace(crossroad_nodes, crossroad_positions, c_edges))
 
-    title_text = f"C-edge graph: {len(c_edges)} C-edges, {len(virtual_cnodes)} virtual C-nodes, {len(crossroad_nodes)} crossroads"
+    title_text = f"C-edge graph: {len(c_edges)} C-edges, {len(virtual_cnodes)} virtual C-nodes"
 
     fig = go.Figure(data=traces)
     fig.update_layout(
