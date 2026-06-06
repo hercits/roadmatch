@@ -21,11 +21,13 @@ from mock.graph_simplifier import (
     build_node_to_cedges_map,
     cluster_connection_nodes,
     cluster_near_parallel_edges,
+    cluster_parallelograms,
     create_virtual_cnodes,
     filter_spur_core_edges,
     find_parallelograms_near_cnodes,
     find_small_parallelograms,
     identify_connection_nodes,
+    merge_intersection_cnodes,
     merge_t_junction_cnodes,
     recompute_c_edge_geometry,
     split_c_edges_at_intersection_nodes,
@@ -123,6 +125,42 @@ def main() -> None:
 
     print("Merging T-junction C-nodes...")
     virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, 50.0)
+
+    print("Finding parallelograms...")
+    parallelograms = find_parallelograms_near_cnodes(
+        c_edges, virtual_cnodes, edge_features,
+        near_threshold_m=50.0, parallel_angle_threshold=15.0,
+    )
+    print(f"Parallelograms: {len(parallelograms)}")
+
+    print("Clustering parallelograms into crossroads...")
+    intersection_clusters = cluster_parallelograms(parallelograms, cluster_radius_m=50.0)
+    print(f"Crossroad clusters: {len(intersection_clusters)}")
+
+    cluster_cnodes_before_merge = []
+    for cluster in intersection_clusters:
+        cluster_center = cluster['center']
+        nearby = []
+        for cn_id, vnode in virtual_cnodes.items():
+            if haversine_m(vnode['position'], cluster_center) < 50.0:
+                nearby.append({
+                    'id': cn_id,
+                    'position': vnode['position'],
+                    'name': vnode['id'],
+                })
+        
+        if nearby:
+            avg_lon = sum(cn['position'][0] for cn in nearby) / len(nearby)
+            avg_lat = sum(cn['position'][1] for cn in nearby) / len(nearby)
+            cluster['center'] = (avg_lon, avg_lat)
+        
+        cluster_cnodes_before_merge.append(nearby)
+        if nearby:
+            print(f"  Cluster at ({cluster['center'][0]:.6f}, {cluster['center'][1]:.6f}): {len(nearby)} C-nodes")
+
+    print("Merging intersection C-nodes...")
+    virtual_cnodes = merge_intersection_cnodes(virtual_cnodes, intersection_clusters, near_threshold_m=50.0)
+    print(f"Virtual C-nodes after intersection merge: {len(virtual_cnodes)}")
 
     print("Updating C-edge endpoints...")
     update_c_edge_endpoints(c_edges, virtual_cnodes)
@@ -308,17 +346,11 @@ def main() -> None:
             showlegend=False,
         ))
 
-    # 6. Find and draw parallelograms based on raw edge connectivity
-    print("Finding parallelograms from raw edges...")
-    
-    parallelograms = find_parallelograms_near_cnodes(c_edges, virtual_cnodes, edge_features, max_edge_length_m=25.0, parallel_angle_threshold=15.0)
-    print(f"Found {len(parallelograms)} parallelograms")
-    
+    # 6. Draw parallelograms and crossroad clusters
     # Filter parallelograms to only those within focus radius
     nearby_parallelograms = []
     for pg in parallelograms:
         vertices = pg['vertices']
-        # Check if any vertex is within focus radius
         if any(haversine_m(v, center) < focus_radius for v in vertices):
             nearby_parallelograms.append(pg)
     
@@ -330,13 +362,12 @@ def main() -> None:
         pg_lats = []
         for pg in nearby_parallelograms:
             vertices = pg['vertices']
-            # Draw polygon outline with None separator
             for v in vertices:
                 pg_lons.append(v[0])
                 pg_lats.append(v[1])
-            pg_lons.append(vertices[0][0])  # Close polygon
+            pg_lons.append(vertices[0][0])
             pg_lats.append(vertices[0][1])
-            pg_lons.append(None)  # Separator
+            pg_lons.append(None)
             pg_lats.append(None)
         
         traces.append(go.Scattermap(
@@ -371,8 +402,8 @@ def main() -> None:
             lat=center_lats,
             mode="markers",
             marker=dict(
-                size=18,
-                color="rgba(255, 0, 0, 1.0)",
+                size=14,
+                color="rgba(255, 0, 0, 0.7)",
                 symbol="circle",
             ),
             hovertext=center_hovers,
@@ -380,7 +411,100 @@ def main() -> None:
             showlegend=False,
         ))
 
-    # 7. Reference grid
+    # 7. Draw crossroad cluster centers
+    nearby_clusters = []
+    nearby_cluster_cnodes = []
+    for cluster, cnodes in zip(intersection_clusters, cluster_cnodes_before_merge):
+        if haversine_m(cluster['center'], center) < focus_radius:
+            nearby_clusters.append(cluster)
+            nearby_cluster_cnodes.append(cnodes)
+    
+    print(f"Nearby crossroad clusters: {len(nearby_clusters)}")
+    
+    if nearby_clusters:
+        cluster_lons = []
+        cluster_lats = []
+        cluster_hovers = []
+        for i, (cluster, cnodes) in enumerate(zip(nearby_clusters, nearby_cluster_cnodes)):
+            cluster_lons.append(cluster['center'][0])
+            cluster_lats.append(cluster['center'][1])
+            merged_names = [cn['name'] for cn in cnodes]
+            cluster_hovers.append(
+                f"Crossroad #{i}<br>"
+                f"Merged C-nodes: {', '.join(merged_names)}<br>"
+                f"Count: {len(cnodes)}<br>"
+                f"Parallelograms: {len(cluster['parallelograms'])}<br>"
+                f"Center: ({cluster['center'][0]:.6f}, {cluster['center'][1]:.6f})"
+            )
+        
+        traces.append(go.Scattermap(
+            lon=cluster_lons,
+            lat=cluster_lats,
+            mode="markers",
+            marker=dict(
+                size=24,
+                color="rgba(0, 100, 255, 0.8)",
+                symbol="circle",
+            ),
+            hovertext=cluster_hovers,
+            hoverinfo="text",
+            showlegend=False,
+        ))
+
+    # 7.5 Draw original C-nodes that will be merged (before merge)
+    for cluster_idx, (cluster, cnodes) in enumerate(zip(nearby_clusters, nearby_cluster_cnodes)):
+        if not cnodes:
+            continue
+        
+        cluster_center = cluster['center']
+        
+        orig_lons = [cn['position'][0] for cn in cnodes]
+        orig_lats = [cn['position'][1] for cn in cnodes]
+        orig_hovers = [
+            f"Original C-node {cn['name']}<br>"
+            f"Will merge into Crossroad #{cluster_idx}"
+            for cn in cnodes
+        ]
+        
+        traces.append(go.Scattermap(
+            lon=orig_lons,
+            lat=orig_lats,
+            mode="markers",
+            marker=dict(size=10, color="rgba(148, 0, 211, 0.8)", symbol="circle"),
+            hovertext=orig_hovers,
+            hoverinfo="text",
+            showlegend=False,
+        ))
+        
+        line_lons = []
+        line_lats = []
+        for cn in cnodes:
+            p1 = cn['position']
+            p2 = cluster_center
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            dist = haversine_m(p1, p2)
+            if dist < 1.0:
+                continue
+            dash_len = dist / 111000.0 / 8
+            steps = max(2, int(dist / (dash_len * 111000.0 * 2)))
+            for s in range(steps):
+                t1 = s * 2 / (steps * 2)
+                t2 = (s * 2 + 1) / (steps * 2)
+                line_lons.extend([p1[0] + dx * t1, p1[0] + dx * t2, None])
+                line_lats.extend([p1[1] + dy * t1, p1[1] + dy * t2, None])
+        
+        if line_lons:
+            traces.append(go.Scattermap(
+                lon=line_lons,
+                lat=line_lats,
+                mode="lines",
+                line=dict(width=2, color="rgba(148, 0, 211, 0.6)"),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
+
+    # 8. Reference grid
     min_lon = center[0] - 0.005
     max_lon = center[0] + 0.005
     min_lat = center[1] - 0.004

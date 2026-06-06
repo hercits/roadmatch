@@ -2097,6 +2097,152 @@ def _find_edge_parallelograms_local(
     return parallelograms
 
 
+def cluster_parallelograms(
+    parallelograms: List[Dict[str, Any]],
+    cluster_radius_m: float = 50.0,
+) -> List[Dict[str, Any]]:
+    """Cluster nearby parallelograms into crossroad groups.
+
+    Uses Union-Find to group parallelograms whose centers are within
+    cluster_radius_m of each other.
+
+    Args:
+        parallelograms: List of parallelogram dicts from find_parallelograms_near_cnodes().
+        cluster_radius_m: Maximum distance between parallelogram centers to cluster (default 50.0).
+
+    Returns:
+        List of crossroad cluster dicts:
+        [
+            {
+                'center': (lon, lat),
+                'parallelograms': [...],
+            },
+            ...
+        ]
+    """
+    if not parallelograms:
+        return []
+
+    n = len(parallelograms)
+
+    centers = []
+    for pg in parallelograms:
+        vertices = pg['vertices']
+        cx = sum(v[0] for v in vertices) / len(vertices)
+        cy = sum(v[1] for v in vertices) / len(vertices)
+        centers.append((cx, cy))
+
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        if parent[i] != i:
+            parent[i] = find(parent[i])
+        return parent[i]
+
+    def union(i: int, j: int) -> None:
+        root_i = find(i)
+        root_j = find(j)
+        if root_i != root_j:
+            parent[root_i] = root_j
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if haversine_m(centers[i], centers[j]) < cluster_radius_m:
+                union(i, j)
+
+    clusters: Dict[int, List[int]] = {}
+    for i in range(n):
+        root = find(i)
+        if root not in clusters:
+            clusters[root] = []
+        clusters[root].append(i)
+
+    result = []
+    for indices in clusters.values():
+        cluster_pgs = [parallelograms[i] for i in indices]
+        cluster_centers = [centers[i] for i in indices]
+        avg_lon = sum(c[0] for c in cluster_centers) / len(cluster_centers)
+        avg_lat = sum(c[1] for c in cluster_centers) / len(cluster_centers)
+        result.append({
+            'center': (avg_lon, avg_lat),
+            'parallelograms': cluster_pgs,
+        })
+
+    return result
+
+
+def merge_intersection_cnodes(
+    virtual_cnodes: Dict[int, Dict[str, Any]],
+    intersection_clusters: List[Dict[str, Any]],
+    near_threshold_m: float = 50.0,
+) -> Dict[int, Dict[str, Any]]:
+    """Merge C-nodes near crossroad clusters into single C-nodes.
+
+    For each crossroad cluster, finds all C-nodes within near_threshold_m
+    of the cluster center and merges them into one C-node.
+
+    Args:
+        virtual_cnodes: Dict from create_virtual_cnodes().
+        intersection_clusters: List of crossroad cluster dicts from cluster_parallelograms().
+        near_threshold_m: Distance threshold for C-node merging (default 50.0).
+
+    Returns:
+        Updated dict of virtual C-nodes with intersection C-nodes merged and re-numbered.
+    """
+    if not intersection_clusters:
+        return virtual_cnodes
+
+    to_merge: Dict[int, int] = {}
+
+    for cluster_idx, cluster in enumerate(intersection_clusters):
+        cluster_center = cluster['center']
+
+        nearby_cnodes = []
+        for cn_id, vnode in virtual_cnodes.items():
+            if cn_id in to_merge:
+                continue
+            dist = haversine_m(vnode['position'], cluster_center)
+            if dist < near_threshold_m:
+                nearby_cnodes.append(cn_id)
+
+        if len(nearby_cnodes) <= 1:
+            continue
+
+        merged_cedges = set()
+        merged_assoc = set()
+        merged_nodes = []
+        merged_positions = []
+
+        for cn_id in nearby_cnodes:
+            vnode = virtual_cnodes[cn_id]
+            merged_cedges.update(vnode['connected_cedges'])
+            merged_assoc.update(vnode['c_edge_end_associations'])
+            merged_nodes.extend(vnode['original_nodes'])
+            merged_positions.append(vnode['position'])
+
+        avg_lon = sum(p[0] for p in merged_positions) / len(merged_positions)
+        avg_lat = sum(p[1] for p in merged_positions) / len(merged_positions)
+
+        primary_id = nearby_cnodes[0]
+        virtual_cnodes[primary_id]['position'] = (avg_lon, avg_lat)
+        virtual_cnodes[primary_id]['connected_cedges'] = merged_cedges
+        virtual_cnodes[primary_id]['c_edge_end_associations'] = merged_assoc
+        virtual_cnodes[primary_id]['original_nodes'] = list(set(merged_nodes))
+
+        for cn_id in nearby_cnodes[1:]:
+            to_merge[cn_id] = primary_id
+
+    for cn_id in to_merge:
+        del virtual_cnodes[cn_id]
+
+    new_cnodes: Dict[int, Dict[str, Any]] = {}
+    for new_id, (old_id, vnode) in enumerate(sorted(virtual_cnodes.items())):
+        vnode['id'] = f'C-node_{new_id}'
+        new_cnodes[new_id] = vnode
+
+    return new_cnodes
+
+
 def find_small_parallelograms(
     c_edges: List[Dict[str, Any]],
     max_edge_length_m: float = 25.0,
