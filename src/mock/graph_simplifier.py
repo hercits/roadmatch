@@ -1832,3 +1832,374 @@ def update_c_edge_endpoints(
             c_edge['connected_vnodes'] = cedge_to_vnodes[ce_idx]
         else:
             c_edge['connected_vnodes'] = []
+
+
+def find_parallelograms_near_cnodes(
+    c_edges: List[Dict[str, Any]],
+    virtual_cnodes: Dict[int, Dict[str, Any]],
+    edge_features: List[Dict[str, Any]],
+    near_threshold_m: float = 50.0,
+    max_edge_length_m: float = 25.0,
+    min_edge_length_m: float = 1.0,
+    parallel_angle_threshold: float = 15.0,
+) -> List[Dict[str, Any]]:
+    """Find parallelograms formed by raw edges near C-nodes.
+
+    Only searches for parallelograms in the vicinity of C-nodes that connect
+    3 or more C-edges (intersection points). This avoids the O(N^4) complexity
+    of searching the entire dataset.
+
+    Args:
+        c_edges: List of C-edge dicts.
+        virtual_cnodes: Dict of C-node dicts from create_virtual_cnodes().
+        edge_features: List of edge GeoJSON features.
+        near_threshold_m: Distance threshold for C-node clustering (default 50.0).
+        max_edge_length_m: Maximum edge length in meters (default 25.0).
+        min_edge_length_m: Minimum edge length in meters (default 1.0).
+        parallel_angle_threshold: Angle threshold for parallel detection (default 15.0).
+
+    Returns:
+        List of parallelogram dicts:
+        {
+            'vertices': tuple of 4 (lon, lat) coordinates,
+            'edges': tuple of 4 edge indices,
+            'edge_lengths': tuple of 4 edge lengths in meters,
+        }
+    """
+    search_radius_m = 2 * near_threshold_m
+
+    # Identify intersection C-nodes (3+ connected C-edges)
+    intersection_cnodes = []
+    for vnode_id, vnode in virtual_cnodes.items():
+        if len(vnode.get('connected_cedges', set())) >= 3:
+            intersection_cnodes.append(vnode)
+
+    # For each intersection C-node, collect nearby edges
+    all_parallelograms = []
+    seen_edge_sets = set()
+
+    for vnode in intersection_cnodes:
+        vnode_pos = vnode['position']
+
+        # Collect edges within search radius
+        local_edges = []
+        for idx, ef in enumerate(edge_features):
+            coords = ef['geometry']['coordinates']
+            mid_lon = (coords[0][0] + coords[-1][0]) / 2
+            mid_lat = (coords[0][1] + coords[-1][1]) / 2
+            mid_coord = (mid_lon, mid_lat)
+
+            if haversine_m(mid_coord, vnode_pos) <= search_radius_m:
+                local_edges.append((idx, ef))
+
+        # Run parallelogram detection on local edges
+        local_parallelograms = _find_edge_parallelograms_local(
+            local_edges,
+            max_edge_length_m=max_edge_length_m,
+            min_edge_length_m=min_edge_length_m,
+            parallel_angle_threshold=parallel_angle_threshold,
+        )
+
+        # Deduplicate across all C-nodes
+        for pg in local_parallelograms:
+            edge_set = frozenset(pg['edges'])
+            if edge_set not in seen_edge_sets:
+                seen_edge_sets.add(edge_set)
+                all_parallelograms.append(pg)
+
+    return all_parallelograms
+
+
+def _find_edge_parallelograms_local(
+    local_edges: List[tuple],
+    max_edge_length_m: float = 25.0,
+    min_edge_length_m: float = 1.0,
+    parallel_angle_threshold: float = 15.0,
+) -> List[Dict[str, Any]]:
+    """Find parallelograms in a local set of edges.
+
+    Args:
+        local_edges: List of (idx, edge_feature) tuples.
+        max_edge_length_m: Maximum edge length in meters.
+        min_edge_length_m: Minimum edge length in meters.
+        parallel_angle_threshold: Angle threshold for parallel detection.
+
+    Returns:
+        List of parallelogram dicts.
+    """
+    # Build direction groups and spatial grid
+    direction_groups: Dict[int, List[int]] = {}
+    spatial_grid: Dict[tuple, List[int]] = {}
+    cell_size = max_edge_length_m / 111000.0
+
+    # Map from local index to global index
+    local_to_global = {}
+
+    for local_idx, (global_idx, ef) in enumerate(local_edges):
+        local_to_global[local_idx] = global_idx
+
+        props = ef['properties']
+        coords = ef['geometry']['coordinates']
+        start = (coords[0][0], coords[0][1])
+        end = (coords[-1][0], coords[-1][1])
+
+        length = haversine_m(start, end)
+        if length < min_edge_length_m or length > max_edge_length_m:
+            continue
+
+        direction = props.get('direction_deg', 0)
+        group_key = int(round(direction / parallel_angle_threshold) * parallel_angle_threshold)
+        if group_key not in direction_groups:
+            direction_groups[group_key] = []
+        direction_groups[group_key].append(local_idx)
+
+        # Use start/end coordinates for spatial grid
+        for coord in (start, end):
+            cell = (int(coord[0] / cell_size), int(coord[1] / cell_size))
+            if cell not in spatial_grid:
+                spatial_grid[cell] = []
+            spatial_grid[cell].append(local_idx)
+
+    def get_nearby_edges(coord: tuple, exclude: set) -> List[int]:
+        """Get edges near a coordinate, excluding specified edge indices."""
+        cell_x = int(coord[0] / cell_size)
+        cell_y = int(coord[1] / cell_size)
+        result = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                cell = (cell_x + dx, cell_y + dy)
+                if cell in spatial_grid:
+                    for eidx in spatial_grid[cell]:
+                        if eidx not in exclude:
+                            result.append(eidx)
+        return result
+
+    parallelograms = []
+    seen = set()
+    group_keys = sorted(direction_groups.keys())
+
+    for i in range(len(group_keys)):
+        for j in range(i + 1, len(group_keys)):
+            g1_key = group_keys[i]
+            g2_key = group_keys[j]
+            angle_diff = abs(g1_key - g2_key)
+            if angle_diff > 90:
+                angle_diff = 180 - angle_diff
+            if angle_diff < 30:
+                continue
+
+            g1_edges = direction_groups[g1_key]
+            g2_edges = direction_groups[g2_key]
+
+            # Check both directions: g1 as "A pair" and g2 as "B pair"
+            for group_a, group_b in [(g1_edges, g2_edges), (g2_edges, g1_edges)]:
+                for ai in range(len(group_a)):
+                    for aj in range(ai + 1, len(group_a)):
+                        a1_local = group_a[ai]
+                        a2_local = group_a[aj]
+
+                        a1 = local_edges[a1_local][1]
+                        a2 = local_edges[a2_local][1]
+
+                        a1_u, a1_v = a1['properties']['u'], a1['properties']['v']
+                        a2_u, a2_v = a2['properties']['u'], a2['properties']['v']
+
+                        # A edges must not share nodes
+                        if a1_u in (a2_u, a2_v) or a1_v in (a2_u, a2_v):
+                            continue
+
+                        # Find B edges near A edge endpoints
+                        exclude = {a1_local, a2_local}
+                        nearby_b = set()
+
+                        a1_start = (a1['geometry']['coordinates'][0][0], a1['geometry']['coordinates'][0][1])
+                        a1_end = (a1['geometry']['coordinates'][-1][0], a1['geometry']['coordinates'][-1][1])
+                        a2_start = (a2['geometry']['coordinates'][0][0], a2['geometry']['coordinates'][0][1])
+                        a2_end = (a2['geometry']['coordinates'][-1][0], a2['geometry']['coordinates'][-1][1])
+
+                        for coord in (a1_start, a1_end, a2_start, a2_end):
+                            for eidx in get_nearby_edges(coord, exclude):
+                                if eidx in group_b:
+                                    nearby_b.add(eidx)
+
+                        nearby_b = list(nearby_b)
+
+                        for bi in range(len(nearby_b)):
+                            for bj in range(bi + 1, len(nearby_b)):
+                                b1_local = nearby_b[bi]
+                                b2_local = nearby_b[bj]
+
+                                b1 = local_edges[b1_local][1]
+                                b2 = local_edges[b2_local][1]
+
+                                b1_u, b1_v = b1['properties']['u'], b1['properties']['v']
+                                b2_u, b2_v = b2['properties']['u'], b2['properties']['v']
+
+                                # B edges must not share nodes
+                                if b1_u in (b2_u, b2_v) or b1_v in (b2_u, b2_v):
+                                    continue
+
+                                # Check if 4 edges form a closed cycle
+                                all_nodes = [a1_u, a1_v, a2_u, a2_v, b1_u, b1_v, b2_u, b2_v]
+                                unique_nodes = list(set(all_nodes))
+
+                                if len(unique_nodes) != 4:
+                                    continue
+
+                                # Each node must appear exactly twice (degree 2)
+                                node_count = {}
+                                for n in all_nodes:
+                                    node_count[n] = node_count.get(n, 0) + 1
+
+                                if any(c != 2 for c in node_count.values()):
+                                    continue
+
+                                # Deduplicate using global indices
+                                a1_global = local_to_global[a1_local]
+                                a2_global = local_to_global[a2_local]
+                                b1_global = local_to_global[b1_local]
+                                b2_global = local_to_global[b2_local]
+
+                                cycle_key = frozenset([a1_global, a2_global, b1_global, b2_global])
+                                if cycle_key in seen:
+                                    continue
+                                seen.add(cycle_key)
+
+                                # Compute edge lengths and vertices
+                                a1_start = (a1['geometry']['coordinates'][0][0], a1['geometry']['coordinates'][0][1])
+                                a1_end = (a1['geometry']['coordinates'][-1][0], a1['geometry']['coordinates'][-1][1])
+                                a2_start = (a2['geometry']['coordinates'][0][0], a2['geometry']['coordinates'][0][1])
+                                a2_end = (a2['geometry']['coordinates'][-1][0], a2['geometry']['coordinates'][-1][1])
+                                b1_start = (b1['geometry']['coordinates'][0][0], b1['geometry']['coordinates'][0][1])
+                                b1_end = (b1['geometry']['coordinates'][-1][0], b1['geometry']['coordinates'][-1][1])
+                                b2_start = (b2['geometry']['coordinates'][0][0], b2['geometry']['coordinates'][0][1])
+                                b2_end = (b2['geometry']['coordinates'][-1][0], b2['geometry']['coordinates'][-1][1])
+
+                                len_a1 = haversine_m(a1_start, a1_end)
+                                len_a2 = haversine_m(a2_start, a2_end)
+                                len_b1 = haversine_m(b1_start, b1_end)
+                                len_b2 = haversine_m(b2_start, b2_end)
+
+                                # Convert node_id strings to coordinates
+                                vertex_coords = []
+                                for node_id in unique_nodes:
+                                    parts = node_id.split('_')
+                                    lon = float(parts[0])
+                                    lat = float(parts[1])
+                                    vertex_coords.append((lon, lat))
+
+                                parallelograms.append({
+                                    'vertices': tuple(vertex_coords),
+                                    'edges': (a1_global, a2_global, b1_global, b2_global),
+                                    'edge_lengths': (len_a1, len_a2, len_b1, len_b2),
+                                })
+
+    return parallelograms
+
+
+def find_small_parallelograms(
+    c_edges: List[Dict[str, Any]],
+    max_edge_length_m: float = 25.0,
+    min_edge_length_m: float = 1.0,
+    parallel_angle_threshold: float = 15.0,
+) -> List[Dict[str, Any]]:
+    """Find all parallelograms formed by crossing C-edges with small edge lengths.
+
+    Groups C-edges by direction, then for each pair of non-parallel groups,
+    finds parallelograms where all 4 edges are shorter than max_edge_length_m
+    and longer than min_edge_length_m (to exclude coincident edges).
+
+    Args:
+        c_edges: List of C-edge dicts.
+        max_edge_length_m: Maximum edge length in meters (default 25.0).
+        min_edge_length_m: Minimum edge length in meters (default 1.0).
+        parallel_angle_threshold: Angle threshold for parallel detection (default 15.0).
+
+    Returns:
+        List of parallelogram dicts:
+        {
+            'vertices': tuple of 4 (lon, lat) coordinates,
+            'g1_edges': (ce_idx_a, ce_idx_b) - parallel pair from group 1,
+            'g2_edges': (ce_idx_c, ce_idx_d) - parallel pair from group 2,
+            'edge_lengths': tuple of 4 edge lengths in meters,
+        }
+    """
+    active_edges = [(i, ce) for i, ce in enumerate(c_edges) if not ce.get('is_split', False)]
+
+    direction_groups: Dict[int, List[tuple]] = {}
+    for idx, ce in active_edges:
+        d = ce['direction_deg']
+        group_key = round(d / parallel_angle_threshold) * parallel_angle_threshold
+        group_key_int = int(group_key)
+        if group_key_int not in direction_groups:
+            direction_groups[group_key_int] = []
+        direction_groups[group_key_int].append((idx, ce))
+
+    parallelograms = []
+    group_keys = sorted(direction_groups.keys())
+
+    for i in range(len(group_keys)):
+        for j in range(i + 1, len(group_keys)):
+            g1_key = group_keys[i]
+            g2_key = group_keys[j]
+            angle_diff = abs(g1_key - g2_key)
+            if angle_diff > 90:
+                angle_diff = 180 - angle_diff
+            if angle_diff < 30:
+                continue
+
+            g1_edges = direction_groups[g1_key]
+            g2_edges = direction_groups[g2_key]
+            
+            # Skip if either group is too large (performance optimization)
+            if len(g1_edges) > 20 or len(g2_edges) > 20:
+                continue
+
+            for a in range(len(g1_edges)):
+                for b in range(a + 1, len(g1_edges)):
+                    idx_a, ce_a = g1_edges[a]
+                    idx_b, ce_b = g1_edges[b]
+
+                    for c in range(len(g2_edges)):
+                        for d in range(c + 1, len(g2_edges)):
+                            idx_c, ce_c = g2_edges[c]
+                            idx_d, ce_d = g2_edges[d]
+
+                            p1 = line_intersection_2d(
+                                ce_a['start_coord'], ce_a['end_coord'],
+                                ce_c['start_coord'], ce_c['end_coord']
+                            )
+                            p2 = line_intersection_2d(
+                                ce_a['start_coord'], ce_a['end_coord'],
+                                ce_d['start_coord'], ce_d['end_coord']
+                            )
+                            p3 = line_intersection_2d(
+                                ce_b['start_coord'], ce_b['end_coord'],
+                                ce_c['start_coord'], ce_c['end_coord']
+                            )
+                            p4 = line_intersection_2d(
+                                ce_b['start_coord'], ce_b['end_coord'],
+                                ce_d['start_coord'], ce_d['end_coord']
+                            )
+
+                            if not (p1 and p2 and p3 and p4):
+                                continue
+
+                            e1 = haversine_m(p1, p2)
+                            e2 = haversine_m(p2, p4)
+                            e3 = haversine_m(p4, p3)
+                            e4 = haversine_m(p3, p1)
+
+                            if (min_edge_length_m <= e1 <= max_edge_length_m and
+                                min_edge_length_m <= e2 <= max_edge_length_m and
+                                min_edge_length_m <= e3 <= max_edge_length_m and
+                                min_edge_length_m <= e4 <= max_edge_length_m):
+                                parallelograms.append({
+                                    'vertices': (p1, p2, p4, p3),
+                                    'g1_edges': (idx_a, idx_b),
+                                    'g2_edges': (idx_c, idx_d),
+                                    'edge_lengths': (e1, e2, e3, e4),
+                                })
+
+    return parallelograms
+

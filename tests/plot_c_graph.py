@@ -201,6 +201,113 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
     return traces
 
 
+def build_reference_grid_traces(
+    edge_features: list[dict],
+    grid_spacing_deg: float = 0.01,
+) -> list[go.Scattermap]:
+    """Build latitude/longitude reference grid lines.
+    
+    Args:
+        edge_features: List of edge GeoJSON features to determine bounds.
+        grid_spacing_deg: Grid spacing in degrees (default 0.01 = ~1km).
+    
+    Returns:
+        List of Scattermap traces for grid lines and labels.
+    """
+    # Get bounds from edge features
+    min_lon = min(f['geometry']['coordinates'][0][0] for f in edge_features)
+    max_lon = max(f['geometry']['coordinates'][-1][0] for f in edge_features)
+    min_lat = min(f['geometry']['coordinates'][0][1] for f in edge_features)
+    max_lat = max(f['geometry']['coordinates'][-1][1] for f in edge_features)
+    
+    # Extend bounds slightly
+    margin = grid_spacing_deg * 0.5
+    min_lon -= margin
+    max_lon += margin
+    min_lat -= margin
+    max_lat += margin
+    
+    traces: list[go.Scattermap] = []
+    
+    # Generate latitude lines (horizontal)
+    lat_start = (min_lat // grid_spacing_deg) * grid_spacing_deg
+    lat_end = ((max_lat // grid_spacing_deg) + 1) * grid_spacing_deg
+    
+    lat_lons = []
+    lat_lats = []
+    lat_texts = []
+    
+    lat = lat_start
+    while lat <= lat_end:
+        lat_lons.extend([min_lon, max_lon, None])
+        lat_lats.extend([lat, lat, None])
+        lat_texts.extend([f"{lat:.3f}°", "", None])
+        lat += grid_spacing_deg
+    
+    if lat_lons:
+        traces.append(go.Scattermap(
+            lon=lat_lons,
+            lat=lat_lats,
+            mode="lines",
+            line=dict(width=1, color="rgba(100, 100, 100, 0.3)"),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+    
+    # Generate longitude lines (vertical)
+    lon_start = (min_lon // grid_spacing_deg) * grid_spacing_deg
+    lon_end = ((max_lon // grid_spacing_deg) + 1) * grid_spacing_deg
+    
+    lon_lons = []
+    lon_lats = []
+    
+    lon = lon_start
+    while lon <= lon_end:
+        lon_lons.extend([lon, lon, None])
+        lon_lats.extend([min_lat, max_lat, None])
+        lon += grid_spacing_deg
+    
+    if lon_lons:
+        traces.append(go.Scattermap(
+            lon=lon_lons,
+            lat=lon_lats,
+            mode="lines",
+            line=dict(width=1, color="rgba(100, 100, 100, 0.3)"),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+    
+    # Add labels at grid intersections
+    label_lons = []
+    label_lats = []
+    label_texts = []
+    
+    lat = lat_start
+    while lat <= lat_end:
+        lon = lon_start
+        while lon <= lon_end:
+            label_lons.append(lon)
+            label_lats.append(lat)
+            label_texts.append(f"{lat:.3f}°, {lon:.3f}°")
+            lon += grid_spacing_deg
+        lat += grid_spacing_deg
+    
+    if label_lons:
+        traces.append(go.Scattermap(
+            lon=label_lons,
+            lat=label_lats,
+            mode="markers+text",
+            marker=dict(size=1, color="rgba(100, 100, 100, 0.5)"),
+            text=label_texts,
+            textposition="top right",
+            textfont=dict(size=8, color="rgba(100, 100, 100, 0.7)"),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+    
+    return traces
+
+
 def plot_c_edge_graph(
     edges_path: Path,
     nodes_path: Path | None = None,
@@ -299,6 +406,9 @@ def plot_c_edge_graph(
     # Add virtual C-node traces
     if virtual_cnodes:
         traces.append(build_virtual_cnode_traces(virtual_cnodes))
+    
+    # Add reference grid traces
+    traces.extend(build_reference_grid_traces(edge_features))
 
     title_text = f"C-edge graph: {len(c_edges)} C-edges, {len(virtual_cnodes)} virtual C-nodes"
 
