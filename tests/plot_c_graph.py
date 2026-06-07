@@ -30,6 +30,7 @@ from mock.graph_simplifier import (
     cluster_near_parallel_edges,
     cluster_parallelograms,
     create_virtual_cnodes,
+    filter_small_link_cedges,
     filter_spur_core_edges,
     find_parallelograms_near_cnodes,
     identify_connection_nodes,
@@ -427,6 +428,7 @@ PIPELINE_STEPS = [
     "split",
     "cluster",
     "c_edges",
+    "filter_link",
     "node_to_cedges",
     "filter_spur",
     "connection_nodes",
@@ -588,6 +590,18 @@ def plot_c_edge_graph(
         if cache_dir:
             _cache_save(cache_dir, "c_edges", c_edges)
 
+    # Step: filter_link
+    cached = _cache_load(cache_dir, "filter_link") if cache_dir and not _should_compute("filter_link", resume_from) else None
+    if cached:
+        c_edges = cached
+    else:
+        t0 = time.time()
+        print("Filtering small link C-edges...")
+        c_edges = filter_small_link_cedges(c_edges, edge_clusters, edge_features)
+        print(f"C-edges after filter: {len(c_edges)} [{time.time() - t0:.1f}s]")
+        if cache_dir:
+            _cache_save(cache_dir, "filter_link", c_edges)
+
     # Step: node_to_cedges
     cached = _cache_load(cache_dir, "node_to_cedges") if cache_dir and not _should_compute("node_to_cedges", resume_from) else None
     if cached:
@@ -607,7 +621,7 @@ def plot_c_edge_graph(
     else:
         t0 = time.time()
         print("Filtering spur core edges...")
-        core_edges = filter_spur_core_edges(core_edges, edge_clusters, edge_features)
+        core_edges = filter_spur_core_edges(core_edges, edge_clusters, edge_features, c_edges)
         recompute_c_edge_geometry(c_edges, core_edges, edge_clusters, edge_features, node_coords, near_threshold_m)
         print(f"  [{time.time() - t0:.1f}s]")
         if cache_dir:

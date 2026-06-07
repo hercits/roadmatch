@@ -435,6 +435,52 @@ def build_c_edge_graph(
     return c_edges
 
 
+def filter_small_link_cedges(
+    c_edges: List[Dict[str, Any]],
+    edge_clusters: List[List[int]],
+    edge_features: List[Dict[str, Any]],
+    max_size: int = 2,
+) -> List[Dict[str, Any]]:
+    """Remove small C-edges composed entirely of *_link highway edges.
+
+    Args:
+        c_edges: List of C-edge dicts.
+        edge_clusters: List of edge index lists for each cluster.
+        edge_features: Original edge GeoJSON features.
+        max_size: Maximum C-edge size to consider for removal.
+
+    Returns:
+        Filtered list of C-edges with small pure-link ones removed.
+    """
+    link_types = {'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'}
+    keep = []
+
+    for ce in c_edges:
+        pidx = ce.get('parent_idx', ce['idx'])
+        if pidx >= len(edge_clusters) or ce.get('size', 0) > max_size:
+            keep.append(ce)
+            continue
+
+        cluster = edge_clusters[pidx]
+        all_link = True
+        has_edges = False
+        for ei in cluster:
+            if ei >= len(edge_features):
+                continue
+            has_edges = True
+            hw = edge_features[ei]['properties'].get('highway', '')
+            types = hw if isinstance(hw, list) else [hw]
+            if not all(isinstance(t, str) and t in link_types for t in types):
+                all_link = False
+                break
+
+        if has_edges and all_link:
+            continue
+        keep.append(ce)
+
+    return keep
+
+
 def build_node_to_cedges_map(
     c_edges: List[Dict[str, Any]],
     edge_clusters: List[List[int]],
@@ -452,7 +498,11 @@ def build_node_to_cedges_map(
     """
     node_to_cedges: Dict[str, set] = {}
 
-    for ce_idx, cluster in enumerate(edge_clusters):
+    for ce in c_edges:
+        ce_idx = ce['idx']
+        if ce_idx >= len(edge_clusters):
+            continue
+        cluster = edge_clusters[ce_idx]
         for edge_idx in cluster:
             props = edge_features[edge_idx]['properties']
             u = props['u']
@@ -473,6 +523,7 @@ def filter_spur_core_edges(
     core_edges_per_cluster: Dict[int, set],
     edge_clusters: List[List[int]],
     edge_features: List[Dict[str, Any]],
+    c_edges: List[Dict[str, Any]] | None = None,
 ) -> Dict[int, set]:
     """Filter out spur core edges (edges where both endpoints only belong to current C-edge).
 
@@ -483,12 +534,17 @@ def filter_spur_core_edges(
         core_edges_per_cluster: Dict mapping cluster index to set of core edge indices.
         edge_clusters: List of edge index lists for each C-edge.
         edge_features: Original edge GeoJSON features.
+        c_edges: Optional list of active C-edges. If provided, only iterate over these.
 
     Returns:
         Filtered core_edges_per_cluster with spur edges removed.
     """
     node_to_cedges: Dict[str, set] = {}
-    for ce_idx, cluster in enumerate(edge_clusters):
+    active_indices = {ce['idx'] for ce in c_edges} if c_edges else set(range(len(edge_clusters)))
+    for ce_idx in active_indices:
+        if ce_idx >= len(edge_clusters):
+            continue
+        cluster = edge_clusters[ce_idx]
         for edge_idx in cluster:
             props = edge_features[edge_idx]['properties']
             u = props['u']
@@ -559,7 +615,8 @@ def recompute_c_edge_geometry(
     utm_epsg = auto_utm_epsg(center[0], center[1])
     edge_buffer_radius_m = near_threshold_m / 2.0
 
-    for ce_idx, c_edge in enumerate(c_edges):
+    for c_edge in c_edges:
+        ce_idx = c_edge['idx']
         core = core_edges_per_cluster.get(ce_idx, set(edge_clusters[ce_idx]))
 
         levels = {idx: _edge_highway_level(edge_features[idx]) for idx in core}
@@ -772,6 +829,7 @@ def identify_endpoint_nodes_for_cedge(
     edge_features: List[Dict[str, Any]],
     node_coords: Dict[str, tuple],
     near_threshold_m: float = 50.0,
+    c_edge_map: Dict[int, Dict[str, Any]] | None = None,
 ) -> set:
     """Identify endpoint nodes for a C-edge.
 
@@ -816,7 +874,7 @@ def identify_endpoint_nodes_for_cedge(
     endpoint_nodes = set()
     
     # Special case: always include start_node_id and end_node_id
-    ce = c_edges[c_edge_idx]
+    ce = c_edge_map[c_edge_idx] if c_edge_map else c_edges[c_edge_idx]
     if ce.get('start_node_id') and ce['start_node_id'] in node_coords:
         endpoint_nodes.add(ce['start_node_id'])
     if ce.get('end_node_id') and ce['end_node_id'] in node_coords:
@@ -919,6 +977,7 @@ def _compute_cnode_position(
     node_coords: Dict[str, tuple],
     near_threshold_m: float = 50.0,
     parallel_angle_threshold: float = 15.0,
+    c_edge_map: Dict[int, Dict[str, Any]] | None = None,
 ) -> tuple:
     """Compute C-node position based on connected C-edges using geometric intersection.
     
@@ -937,12 +996,14 @@ def _compute_cnode_position(
     Returns:
         Computed position (lon, lat).
     """
+    _cem = c_edge_map or {ce['idx']: ce for ce in c_edges}
+
     # Group C-edges by direction using parallel_angle_threshold
     direction_groups: List[List[int]] = []
     group_representatives: List[float] = []
     
     for ce_idx in connected_cedges:
-        ce_dir = c_edges[ce_idx]['direction_deg']
+        ce_dir = _cem[ce_idx]['direction_deg']
         
         assigned = False
         for i, rep_dir in enumerate(group_representatives):
@@ -975,7 +1036,7 @@ def _compute_cnode_position(
         min_dist = float('inf')
         best_proj = pos
         for ce_idx in connected_cedges:
-            ce = c_edges[ce_idx]
+            ce = _cem[ce_idx]
             proj = project_to_line(pos, ce['start_coord'], ce['end_coord'])
             dist = haversine_m(pos, proj)
             if dist < min_dist:
@@ -985,8 +1046,8 @@ def _compute_cnode_position(
     
     # Helper to validate intersection is within reasonable distance
     def validate_intersection(intersection, ce1_idx, ce2_idx):
-        ce1 = c_edges[ce1_idx]
-        ce2 = c_edges[ce2_idx]
+        ce1 = _cem[ce1_idx]
+        ce2 = _cem[ce2_idx]
         
         ce1_start_proj = project_to_bearing_m(ce1['start_coord'], ce1['start_coord'], ce1['direction_deg'])
         ce1_end_proj = project_to_bearing_m(ce1['end_coord'], ce1['start_coord'], ce1['direction_deg'])
@@ -1011,15 +1072,15 @@ def _compute_cnode_position(
         # All C-edges parallel: project average position onto the line
         avg_pos = get_avg_pos()
         ce_idx = direction_groups[0][0]
-        ce = c_edges[ce_idx]
+        ce = _cem[ce_idx]
         return project_to_line(avg_pos, ce['start_coord'], ce['end_coord'])
     
     elif num_groups == 2:
         # Two non-parallel groups: compute intersection
         ce1_idx = direction_groups[0][0]
         ce2_idx = direction_groups[1][0]
-        ce1 = c_edges[ce1_idx]
-        ce2 = c_edges[ce2_idx]
+        ce1 = _cem[ce1_idx]
+        ce2 = _cem[ce2_idx]
         
         intersection = line_intersection_2d(
             ce1['start_coord'], ce1['end_coord'],
@@ -1042,8 +1103,8 @@ def _compute_cnode_position(
             for j in range(i + 1, num_groups):
                 ce1_idx = direction_groups[i][0]
                 ce2_idx = direction_groups[j][0]
-                ce1 = c_edges[ce1_idx]
-                ce2 = c_edges[ce2_idx]
+                ce1 = _cem[ce1_idx]
+                ce2 = _cem[ce2_idx]
                 
                 intersection = line_intersection_2d(
                     ce1['start_coord'], ce1['end_coord'],
@@ -1096,11 +1157,13 @@ def create_virtual_cnodes(
         }
     """
     # Identify endpoint nodes for all C-edges (cached)
+    c_edge_map = {ce['idx']: ce for ce in c_edges}
     cedge_endpoint_nodes: Dict[int, set] = {}
-    for ce_idx in range(len(c_edges)):
+    for ce in c_edges:
+        ce_idx = ce['idx']
         cedge_endpoint_nodes[ce_idx] = identify_endpoint_nodes_for_cedge(
             ce_idx, c_edges, edge_clusters, core_edges, edge_features, node_coords,
-            near_threshold_m=near_threshold_m
+            near_threshold_m=near_threshold_m, c_edge_map=c_edge_map
         )
 
     virtual_cnodes: Dict[int, Dict[str, Any]] = {}
@@ -1123,7 +1186,7 @@ def create_virtual_cnodes(
         # Use expanded endpoint nodes (cedge_endpoint_nodes) instead of exact start/end node matching
         c_edge_end_associations = set()
         for ce_idx in connected_cedges:
-            ce = c_edges[ce_idx]
+            ce = c_edge_map[ce_idx]
             ep_nodes = cedge_endpoint_nodes.get(ce_idx, set())
             
             # Project all endpoint nodes onto C-edge direction to split into start/end groups
@@ -1194,7 +1257,7 @@ def create_virtual_cnodes(
             for ce_idx in connected_cedges:
                 if ce_idx in cedges_with_association:
                     continue
-                ce = c_edges[ce_idx]
+                ce = c_edge_map[ce_idx]
                 dist_to_start = haversine_m(avg_pos, ce['start_coord'])
                 dist_to_end = haversine_m(avg_pos, ce['end_coord'])
                 
@@ -1242,7 +1305,8 @@ def create_virtual_cnodes(
         virtual_pos = _compute_cnode_position(
             nodes, connected_cedges, c_edge_end_associations, c_edges, node_coords,
             near_threshold_m=near_threshold_m,
-            parallel_angle_threshold=parallel_angle_threshold
+            parallel_angle_threshold=parallel_angle_threshold,
+            c_edge_map=c_edge_map
         )
 
         virtual_cnodes[cluster_id] = {
@@ -1318,7 +1382,8 @@ def create_virtual_cnodes(
             virtual_pos = _compute_cnode_position(
                 all_nodes, all_connected_cedges, all_c_edge_end_associations,
                 c_edges, node_coords, near_threshold_m=near_threshold_m,
-                parallel_angle_threshold=parallel_angle_threshold
+                parallel_angle_threshold=parallel_angle_threshold,
+                c_edge_map=c_edge_map
             )
         
         new_virtual_cnodes[new_id] = {
@@ -1434,6 +1499,9 @@ def split_c_edges_at_intersection_nodes(
     Returns:
         Updated list of C-edges (original + split pieces).
     """
+    # Build index map for filtered C-edges
+    c_edge_map = {ce['idx']: ce for ce in c_edges}
+
     # Build reverse mapping: C-edge index -> list of connected C-node indices
     cedge_to_vnodes: Dict[int, List[int]] = {}
     for vnode_id, vnode in virtual_cnodes.items():
@@ -1445,7 +1513,8 @@ def split_c_edges_at_intersection_nodes(
     new_c_edges = []
     next_idx = max(ce['idx'] for ce in c_edges) + 1
 
-    for ce_idx, c_edge in enumerate(c_edges):
+    for c_edge in c_edges:
+        ce_idx = c_edge['idx']
         if ce_idx not in cedge_to_vnodes:
             continue
 
@@ -1479,7 +1548,7 @@ def split_c_edges_at_intersection_nodes(
                         continue
                     angle_diff = angular_delta_mod180(
                         c_edge['direction_deg'],
-                        c_edges[other_ce_idx]['direction_deg']
+                        c_edge_map[other_ce_idx]['direction_deg']
                     )
                     if angle_diff < parallel_angle_threshold:
                         is_endpoint = True
@@ -1745,7 +1814,8 @@ def split_c_edges_at_intersection_nodes(
         new_c_edges.extend(split_pieces)
 
     # Handle C-edges with 1 or 2 connected C-nodes (no splitting needed)
-    for ce_idx, c_edge in enumerate(c_edges):
+    for c_edge in c_edges:
+        ce_idx = c_edge['idx']
         if ce_idx not in cedge_to_vnodes:
             continue
         
@@ -1827,7 +1897,8 @@ def update_c_edge_endpoints(
                 cedge_to_vnodes[ce_idx] = []
             cedge_to_vnodes[ce_idx].append(vnode_id)
 
-    for ce_idx, c_edge in enumerate(c_edges):
+    for c_edge in c_edges:
+        ce_idx = c_edge['idx']
         if ce_idx in cedge_to_vnodes:
             c_edge['connected_vnodes'] = cedge_to_vnodes[ce_idx]
         else:
@@ -2270,7 +2341,7 @@ def find_small_parallelograms(
             'edge_lengths': tuple of 4 edge lengths in meters,
         }
     """
-    active_edges = [(i, ce) for i, ce in enumerate(c_edges) if not ce.get('is_split', False)]
+    active_edges = [(ce['idx'], ce) for ce in c_edges if not ce.get('is_split', False)]
 
     direction_groups: Dict[int, List[tuple]] = {}
     for idx, ce in active_edges:

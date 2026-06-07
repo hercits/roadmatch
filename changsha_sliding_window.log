@@ -1,0 +1,3 @@
+D:\01-Codes\roadmatch\src\mock\graph_simplifier.py:67: UserWarning: Geometry is in a geographic CRS. Results from 'buffer' are likely incorrect. Use 'GeoSeries.to_crs()' to re-project geometries to a projected CRS before this operation.
+
+  gdf_buffered['geometry'] = gdf.geometry.buffer(buffer_deg)
