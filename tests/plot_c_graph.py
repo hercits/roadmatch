@@ -625,18 +625,18 @@ def plot_c_edge_graph(
         if cache_dir:
             _cache_save(cache_dir, "node_to_cedges", node_to_cedges)
 
-    # Step: filter_spur
-    cached = _cache_load(cache_dir, "filter_spur") if cache_dir and not _should_compute("filter_spur", resume_from) else None
-    if cached:
-        core_edges, c_edges = cached
-    else:
-        t0 = time.time()
-        print("Filtering spur core edges...")
-        core_edges = filter_spur_core_edges(core_edges, edge_clusters, edge_features, c_edges)
-        recompute_c_edge_geometry(c_edges, core_edges, edge_clusters, edge_features, node_coords, near_threshold_m)
-        print(f"  [{time.time() - t0:.1f}s]")
-        if cache_dir:
-            _cache_save(cache_dir, "filter_spur", (core_edges, c_edges))
+    # Step: filter_spur (DISABLED - keeping all initial core edges)
+    # cached = _cache_load(cache_dir, "filter_spur") if cache_dir and not _should_compute("filter_spur", resume_from) else None
+    # if cached:
+    #     core_edges, c_edges = cached
+    # else:
+    #     t0 = time.time()
+    #     print("Filtering spur core edges...")
+    #     core_edges = filter_spur_core_edges(core_edges, edge_clusters, edge_features, c_edges)
+    #     recompute_c_edge_geometry(c_edges, core_edges, edge_clusters, edge_features, node_coords, near_threshold_m)
+    #     print(f"  [{time.time() - t0:.1f}s]")
+    #     if cache_dir:
+    #         _cache_save(cache_dir, "filter_spur", (core_edges, c_edges))
 
     # Step: connection_nodes
     cached = _cache_load(cache_dir, "connection_nodes") if cache_dir and not _should_compute("connection_nodes", resume_from) else None

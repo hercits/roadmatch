@@ -16,6 +16,7 @@ from utils.geometry import (
     meters_to_degrees_lon,
     offset_to_coordinate,
     point_to_line_distance_m,
+    polyline_length_m,
     project_point_to_line,
     project_to_bearing_m,
     segment_overlap_length_m,
@@ -174,6 +175,15 @@ def merge_subset_clusters(
             node_set.add(props['v'])
         cluster_node_sets.append(node_set)
 
+    # Calculate total length of each initial cluster
+    cluster_lengths: Dict[int, float] = {}
+    for i, c in enumerate(clusters):
+        total_length = 0.0
+        for edge_idx in c:
+            coords = edge_features[edge_idx]['geometry']['coordinates']
+            total_length += polyline_length_m(coords)
+        cluster_lengths[i] = total_length
+
     core_edges: Dict[int, set] = {i: set(c) for i, c in enumerate(clusters)}
 
     merge_into: Dict[int, int] = {}
@@ -265,6 +275,7 @@ def merge_subset_clusters(
 
     merged_clusters: Dict[int, List[int]] = {}
     absorber: Dict[int, int] = {}
+    # merged_sources: Dict[int, List[int]] = {}  # Track which initial clusters contributed (DISABLED)
 
     for i, c in enumerate(clusters):
         target = i
@@ -273,12 +284,27 @@ def merge_subset_clusters(
         merged_clusters.setdefault(target, []).extend(c)
         if target not in absorber:
             absorber[target] = target
+        # merged_sources.setdefault(target, []).append(i)  # DISABLED
 
     result_clusters = [merged_clusters[k] for k in sorted(merged_clusters.keys())]
 
     result_core_edges: Dict[int, set] = {}
     for new_idx, old_key in enumerate(sorted(merged_clusters.keys())):
+        # Original logic: use absorber cluster's edges
         result_core_edges[new_idx] = core_edges[absorber[old_key]]
+        
+        # DISABLED: Select the initial cluster with the longest total length
+        # source_clusters = merged_sources[old_key]
+        # longest_source = max(source_clusters, key=lambda idx: cluster_lengths[idx])
+        # result_core_edges[new_idx] = core_edges[longest_source]
+        
+        # # Debug: print info for cluster 638 specifically
+        # if new_idx == 638:
+        #     print(f"Cluster 638: {len(merged_clusters[old_key])} edges from {len(source_clusters)} sources")
+        #     print(f"  Longest source: cluster {longest_source} with {len(core_edges[longest_source])} edges, length {cluster_lengths[longest_source]:.1f}m")
+        #     top_5 = sorted(source_clusters, key=lambda idx: cluster_lengths[idx], reverse=True)[:5]
+        #     for idx in top_5:
+        #         print(f"    Source {idx}: {len(core_edges[idx])} edges, length {cluster_lengths[idx]:.1f}m")
 
     return result_clusters, result_core_edges
 
