@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any, Dict, List
 
 import geopandas as gpd
@@ -1477,6 +1478,175 @@ def merge_t_junction_cnodes(
     return new_cnodes
 
 
+def merge_intermediate_t_junctions(
+    virtual_cnodes: Dict[int, Dict[str, Any]],
+    c_edges: List[Dict[str, Any]],
+    near_threshold_m: float = 50.0,
+    angle_threshold_deg: float = 15.0,
+) -> Dict[int, Dict[str, Any]]:
+    """Merge intermediate T-junction C-nodes on opposite sides of the same C-edge.
+
+    Identifies pairs of C-nodes that:
+    1. Both connect to the same C-edge as intermediate (non-endpoint) T-junctions
+    2. Have close projection positions on that C-edge (< near_threshold_m)
+    3. Have similar crossing angles (< angle_threshold_deg)
+    4. Their crossing C-edges extend to opposite sides of the shared C-edge
+
+    Args:
+        virtual_cnodes: Dict from create_virtual_cnodes() or merge_t_junction_cnodes().
+        c_edges: List of C-edge dicts.
+        near_threshold_m: Maximum projection distance for merging (default 50.0).
+        angle_threshold_deg: Maximum angle difference for merging (default 15.0).
+
+    Returns:
+        Updated dict of virtual C-nodes with intermediate T-junctions merged and re-numbered.
+    """
+    # Build C-edge index map
+    c_edge_map = {ce['idx']: ce for ce in c_edges}
+
+    # Identify intermediate T-junction C-nodes for each C-edge
+    # An intermediate T-junction is a C-node connected to a C-edge but without end association
+    cedge_to_intermediate_cnodes: Dict[int, List[int]] = {}
+
+    for cn_id, vnode in virtual_cnodes.items():
+        for ce_idx in vnode['connected_cedges']:
+            # Check if this is an intermediate connection (no end association)
+            has_end_assoc = any(
+                assoc_ce_idx == ce_idx
+                for assoc_ce_idx, _ in vnode['c_edge_end_associations']
+            )
+            if not has_end_assoc:
+                if ce_idx not in cedge_to_intermediate_cnodes:
+                    cedge_to_intermediate_cnodes[ce_idx] = []
+                cedge_to_intermediate_cnodes[ce_idx].append(cn_id)
+
+    # Find pairs to merge
+    to_merge: List[Tuple[int, int]] = []  # (primary_cn_id, secondary_cn_id)
+
+    for ce_idx, cn_list in cedge_to_intermediate_cnodes.items():
+        if len(cn_list) < 2:
+            continue
+
+        ce = c_edge_map.get(ce_idx)
+        if not ce:
+            continue
+
+        # Check all pairs
+        for i in range(len(cn_list)):
+            for j in range(i + 1, len(cn_list)):
+                cn1_id = cn_list[i]
+                cn2_id = cn_list[j]
+
+                cn1 = virtual_cnodes[cn1_id]
+                cn2 = virtual_cnodes[cn2_id]
+
+                # Calculate projection positions on the C-edge
+                proj1 = project_to_bearing_m(
+                    cn1['position'], ce['start_coord'], ce['direction_deg']
+                )
+                proj2 = project_to_bearing_m(
+                    cn2['position'], ce['start_coord'], ce['direction_deg']
+                )
+
+                # Check projection distance
+                proj_dist = abs(proj1 - proj2)
+                if proj_dist >= near_threshold_m:
+                    continue
+
+                # Check angle similarity and opposite sides
+                # Get the crossing C-edge for each C-node (the one that's not ce_idx)
+                cn1_other_cedges = cn1['connected_cedges'] - {ce_idx}
+                cn2_other_cedges = cn2['connected_cedges'] - {ce_idx}
+
+                if not cn1_other_cedges or not cn2_other_cedges:
+                    continue
+
+                # Use the first other C-edge for angle comparison
+                cn1_other_ce = c_edge_map.get(next(iter(cn1_other_cedges)))
+                cn2_other_ce = c_edge_map.get(next(iter(cn2_other_cedges)))
+
+                if not cn1_other_ce or not cn2_other_ce:
+                    continue
+
+                angle_diff = angular_delta_mod180(
+                    cn1_other_ce['direction_deg'], cn2_other_ce['direction_deg']
+                )
+                if angle_diff >= angle_threshold_deg:
+                    continue
+
+                # Check which side of the C-edge the far endpoints of crossing C-edges are on
+                # Find the far endpoint for each crossing C-edge
+                cn1_pos = cn1['position']
+                cn2_pos = cn2['position']
+
+                # For cn1's crossing C-edge, find the endpoint farther from cn1
+                dist1_start = haversine_m(cn1_pos, cn1_other_ce['start_coord'])
+                dist1_end = haversine_m(cn1_pos, cn1_other_ce['end_coord'])
+                if dist1_start > dist1_end:
+                    far_end1 = cn1_other_ce['start_coord']
+                else:
+                    far_end1 = cn1_other_ce['end_coord']
+
+                # For cn2's crossing C-edge, find the endpoint farther from cn2
+                dist2_start = haversine_m(cn2_pos, cn2_other_ce['start_coord'])
+                dist2_end = haversine_m(cn2_pos, cn2_other_ce['end_coord'])
+                if dist2_start > dist2_end:
+                    far_end2 = cn2_other_ce['start_coord']
+                else:
+                    far_end2 = cn2_other_ce['end_coord']
+
+                # Calculate perpendicular offset of far endpoints relative to shared C-edge
+                perp_far1 = signed_perpendicular_offset_m(
+                    far_end1, ce['start_coord'], ce['direction_deg']
+                )
+                perp_far2 = signed_perpendicular_offset_m(
+                    far_end2, ce['start_coord'], ce['direction_deg']
+                )
+
+                # Must be on opposite sides (signs differ)
+                if (perp_far1 > 0) == (perp_far2 > 0):
+                    continue
+
+                # This pair should be merged
+                to_merge.append((cn1_id, cn2_id))
+
+    # Perform merges
+    to_delete = set()
+
+    for primary_id, secondary_id in to_merge:
+        if primary_id in to_delete or secondary_id in to_delete:
+            continue
+
+        primary = virtual_cnodes[primary_id]
+        secondary = virtual_cnodes[secondary_id]
+
+        # Merge secondary into primary
+        primary['connected_cedges'].update(secondary['connected_cedges'])
+        primary['c_edge_end_associations'].update(secondary['c_edge_end_associations'])
+        primary['original_nodes'] = list(
+            set(primary['original_nodes'] + secondary['original_nodes'])
+        )
+
+        # Update position to average
+        avg_lon = (primary['position'][0] + secondary['position'][0]) / 2
+        avg_lat = (primary['position'][1] + secondary['position'][1]) / 2
+        primary['position'] = (avg_lon, avg_lat)
+
+        to_delete.add(secondary_id)
+
+    # Delete merged C-nodes
+    for cn_id in to_delete:
+        del virtual_cnodes[cn_id]
+
+    # Re-number C-nodes
+    new_cnodes: Dict[int, Dict[str, Any]] = {}
+    for new_id, (old_id, vnode) in enumerate(sorted(virtual_cnodes.items())):
+        vnode['id'] = f'C-node_{new_id}'
+        new_cnodes[new_id] = vnode
+
+    return new_cnodes
+
+
 def split_c_edges_at_intersection_nodes(
     c_edges: List[Dict[str, Any]],
     virtual_cnodes: Dict[int, Dict[str, Any]],
@@ -1803,6 +1973,7 @@ def split_c_edges_at_intersection_nodes(
                 'start_node_id': start_vnode['id'],
                 'end_node_id': end_vnode['id'],
                 'size': len(segment_edges),
+                'connected_vnodes': [start_vnode_id, end_vnode_id],
             }
             split_pieces.append(piece)
             next_idx += 1
@@ -1871,6 +2042,32 @@ def split_c_edges_at_intersection_nodes(
             c_edge['end_node_id'] = end_vnode['id']
             c_edge['end_coord'] = end_vnode['position']
 
+    # Update C-nodes' connected_cedges: replace split originals with split pieces
+    for c_edge in c_edges:
+        if c_edge.get('is_split', False):
+            ce_idx = c_edge['idx']
+            piece_indices = c_edge.get('split_pieces', [])
+            
+            # Build mapping: vnode_id -> set of piece indices it's connected to
+            vnode_to_pieces: Dict[int, set] = defaultdict(set)
+            for piece_idx in piece_indices:
+                piece = None
+                for new_ce in new_c_edges:
+                    if new_ce['idx'] == piece_idx:
+                        piece = new_ce
+                        break
+                if piece:
+                    for vn_id in piece.get('connected_vnodes', []):
+                        vnode_to_pieces[vn_id].add(piece_idx)
+            
+            # Update all C-nodes that reference the original
+            for vn_id, vnode in virtual_cnodes.items():
+                if ce_idx in vnode['connected_cedges']:
+                    vnode['connected_cedges'].remove(ce_idx)
+                    # Add references to relevant split pieces (if any)
+                    if vn_id in vnode_to_pieces:
+                        vnode['connected_cedges'].update(vnode_to_pieces[vn_id])
+
     # Return original + split pieces
     return c_edges + new_c_edges
 
@@ -1879,17 +2076,15 @@ def update_c_edge_endpoints(
     c_edges: List[Dict[str, Any]],
     virtual_cnodes: Dict[int, Dict[str, Any]],
 ) -> None:
-    """Store connected C-nodes for each C-edge.
+    """Store connected C-nodes for each C-edge and update endpoint coordinates.
 
-    Modifies c_edges in-place. Stores all connected C-nodes in
-    c_edge['connected_vnodes'] for later processing by
-    split_c_edges_at_intersection_nodes.
+    Updates endpoint coordinates to match connected C-node positions for visual
+    continuity. The direction_deg field is preserved unchanged.
 
     Args:
         c_edges: List of C-edge dicts (modified in-place).
         virtual_cnodes: Dict from create_virtual_cnodes().
     """
-    # Build reverse mapping: C-edge index -> list of virtual C-nodes it's connected to
     cedge_to_vnodes: Dict[int, List[int]] = {}
     for vnode_id, vnode in virtual_cnodes.items():
         for ce_idx in vnode['connected_cedges']:
@@ -1899,10 +2094,105 @@ def update_c_edge_endpoints(
 
     for c_edge in c_edges:
         ce_idx = c_edge['idx']
-        if ce_idx in cedge_to_vnodes:
-            c_edge['connected_vnodes'] = cedge_to_vnodes[ce_idx]
-        else:
+        if ce_idx not in cedge_to_vnodes:
             c_edge['connected_vnodes'] = []
+            continue
+
+        vnodes = cedge_to_vnodes[ce_idx]
+
+        if len(vnodes) < 2:
+            c_edge['connected_vnodes'] = vnodes
+            continue
+
+        direction = c_edge['direction_deg']
+        origin = c_edge['start_coord']
+
+        projections = []
+        for vn_id in vnodes:
+            vn = virtual_cnodes[vn_id]
+            proj = project_to_bearing_m(vn['position'], origin, direction)
+            projections.append((proj, vn_id))
+
+        projections.sort(key=lambda x: x[0])
+
+        start_proj, start_vn_id = projections[0]
+        end_proj, end_vn_id = projections[-1]
+
+        c_edge['start_coord'] = virtual_cnodes[start_vn_id]['position']
+        c_edge['end_coord'] = virtual_cnodes[end_vn_id]['position']
+        c_edge['start_node_id'] = virtual_cnodes[start_vn_id]['id']
+        c_edge['end_node_id'] = virtual_cnodes[end_vn_id]['id']
+        c_edge['connected_vnodes'] = [start_vn_id, end_vn_id]
+
+
+def filter_dangling_cedges(
+    c_edges: List[Dict[str, Any]],
+    virtual_cnodes: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """移除所有断头路（迭代剥离 degree ≤ 1 的 C-nodes）
+    
+    使用队列驱动的级联删除算法，一次性找出所有断头路。
+    当一个 C-node 的度数变为 ≤ 1 时，将其连接的 C-edges 移除，
+    并检查受影响的 C-nodes 是否也变成断头。
+    
+    Args:
+        c_edges: C-edge 字典列表
+        virtual_cnodes: 虚拟 C-node 字典
+    
+    Returns:
+        过滤后的 C-edge 列表（所有保留的 C-nodes 度数 ≥ 2）
+    """
+    from collections import deque
+    
+    # 构建双向映射
+    cedge_to_cnodes: Dict[int, set] = defaultdict(set)
+    for cn_id, cn in virtual_cnodes.items():
+        for ce_idx in cn['connected_cedges']:
+            cedge_to_cnodes[ce_idx].add(cn_id)
+    
+    cn_to_cedges: Dict[int, set] = defaultdict(set)
+    for ce_idx, cn_ids in cedge_to_cnodes.items():
+        for cn_id in cn_ids:
+            cn_to_cedges[cn_id].add(ce_idx)
+    
+    removed_cedges: set = set()
+    removed_cnodes: set = set()
+    
+    # 第一步：移除连接 < 2 个 C-nodes 的 C-edges
+    for ce in c_edges:
+        if len(cedge_to_cnodes.get(ce['idx'], set())) < 2:
+            removed_cedges.add(ce['idx'])
+            # 更新受影响的 C-nodes
+            for cn_id in cedge_to_cnodes.get(ce['idx'], set()):
+                cn_to_cedges[cn_id].discard(ce['idx'])
+    
+    # 第二步：初始化队列：所有 degree ≤ 1 的 C-nodes
+    queue = deque([cn_id for cn_id, cedgs in cn_to_cedges.items() if len(cedgs) <= 1])
+    
+    # 迭代剥离
+    while queue:
+        cn_id = queue.popleft()
+        if cn_id in removed_cnodes:
+            continue
+        
+        removed_cnodes.add(cn_id)
+        
+        # 移除该 C-node 连接的所有 C-edges
+        for ce_idx in list(cn_to_cedges[cn_id]):
+            if ce_idx in removed_cedges:
+                continue
+            removed_cedges.add(ce_idx)
+            
+            # 检查受影响的 C-nodes
+            for other_cn_id in cedge_to_cnodes[ce_idx]:
+                if other_cn_id == cn_id or other_cn_id in removed_cnodes:
+                    continue
+                cn_to_cedges[other_cn_id].discard(ce_idx)
+                if len(cn_to_cedges[other_cn_id]) <= 1:
+                    queue.append(other_cn_id)
+    
+    # 返回保留的 C-edges
+    return [ce for ce in c_edges if ce['idx'] not in removed_cedges]
 
 
 def find_parallelograms_near_cnodes(

@@ -30,11 +30,13 @@ from mock.graph_simplifier import (
     cluster_near_parallel_edges,
     cluster_parallelograms,
     create_virtual_cnodes,
+    filter_dangling_cedges,
     filter_small_link_cedges,
     filter_spur_core_edges,
     find_parallelograms_near_cnodes,
     identify_connection_nodes,
     merge_intersection_cnodes,
+    merge_intermediate_t_junctions,
     merge_t_junction_cnodes,
     recompute_c_edge_geometry,
     split_c_edges_at_intersection_nodes,
@@ -68,8 +70,22 @@ _CLUSTER_COLORS = [
 ]
 
 
-def build_virtual_cnode_traces(virtual_cnodes: dict[int, dict]) -> go.Scattermap:
+def _get_cedge_display_label(ce: dict) -> str:
+    """Get display label for a C-edge using split format.
+    
+    Returns format like "6849-0" for split pieces, or "6849" for non-split edges.
+    """
+    parent_idx = ce.get('parent_idx', ce['idx'])
+    if 'split_idx' in ce:
+        return f"{parent_idx}-{ce['split_idx']}"
+    return str(parent_idx)
+
+
+def build_virtual_cnode_traces(virtual_cnodes: dict[int, dict], c_edges: list[dict]) -> go.Scattermap:
     """Build trace for virtual C-nodes with markers and labels."""
+    # Build mapping from C-edge idx to display label
+    cedge_labels = {ce['idx']: _get_cedge_display_label(ce) for ce in c_edges}
+    
     lons, lats, texts, hover_texts = [], [], [], []
     
     for vnode_id, vnode in virtual_cnodes.items():
@@ -78,10 +94,11 @@ def build_virtual_cnode_traces(virtual_cnodes: dict[int, dict]) -> go.Scattermap
         lats.append(coord[1])
         texts.append(vnode['id'])  # C-node_X label
         
-        # Build hover text with connected C-edges
+        # Build hover text with connected C-edges using display labels
         connected_cedges = sorted(vnode['connected_cedges'])
+        labels = [f"C{cedge_labels.get(ce, ce)}" for ce in connected_cedges]
         hover = f"{vnode['id']}<br>"
-        hover += f"Connected C-edges: {', '.join(f'C{ce}' for ce in connected_cedges)}<br>"
+        hover += f"Connected C-edges: {', '.join(labels)}<br>"
         hover += f"Original nodes: {len(vnode['original_nodes'])}"
         hover_texts.append(hover)
     
@@ -131,13 +148,8 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
         all_lats.extend([start[1], end[1], None])
 
         # Build hover text
-        parent_idx = ce.get('parent_idx', ce['idx'])
-        if 'split_idx' in ce:
-            label = f"C-edge {parent_idx}-{ce['split_idx']}"
-        else:
-            label = f"C-edge {parent_idx}"
-        
-        hover_text = f"{label}<br>Size: {ce['size']} edges<br>Direction: {ce['direction_deg']:.1f}°"
+        label = _get_cedge_display_label(ce)
+        hover_text = f"C-edge {label}<br>Size: {ce['size']} edges<br>Direction: {ce['direction_deg']:.1f}°"
         
         # Add midpoint for hover and label
         mid_lon = (start[0] + end[0]) / 2
@@ -147,10 +159,7 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
         hover_texts.append(hover_text)
         
         # Add edge index label
-        if 'split_idx' in ce:
-            label_texts.append(f"{parent_idx}-{ce['split_idx']}")
-        else:
-            label_texts.append(str(parent_idx))
+        label_texts.append(label)
 
     # Single trace for all C-edges
     traces.append(go.Scattermap(
@@ -435,11 +444,13 @@ PIPELINE_STEPS = [
     "cluster_connection",
     "virtual_cnodes",
     "merge_t_junction",
+    "merge_intermediate_t",
     "parallelograms",
     "crossroads",
     "merge_intersection",
-    "update_endpoints",
     "split_c_edges",
+    "update_endpoints",
+    "filter_dangling",
 ]
 
 
@@ -680,6 +691,22 @@ def plot_c_edge_graph(
         if cache_dir:
             _cache_save(cache_dir, "merge_t_junction", virtual_cnodes)
 
+    # Step: merge_intermediate_t
+    cached = _cache_load(cache_dir, "merge_intermediate_t") if cache_dir and not _should_compute("merge_intermediate_t", resume_from) else None
+    if cached:
+        virtual_cnodes = cached
+    else:
+        t0 = time.time()
+        print("Merging intermediate T-junction C-nodes...")
+        virtual_cnodes = merge_intermediate_t_junctions(
+            virtual_cnodes, c_edges,
+            near_threshold_m=near_threshold_m,
+            angle_threshold_deg=parallel_angle_threshold,
+        )
+        print(f"Virtual C-nodes after merge: {len(virtual_cnodes)} [{time.time() - t0:.1f}s]")
+        if cache_dir:
+            _cache_save(cache_dir, "merge_intermediate_t", virtual_cnodes)
+
     # Step: parallelograms
     cached = _cache_load(cache_dir, "parallelograms") if cache_dir and not _should_compute("parallelograms", resume_from) else None
     if cached:
@@ -731,6 +758,21 @@ def plot_c_edge_graph(
         if cache_dir:
             _cache_save(cache_dir, "merge_intersection", virtual_cnodes)
 
+    # Step: split_c_edges
+    cached = _cache_load(cache_dir, "split_c_edges") if cache_dir and not _should_compute("split_c_edges", resume_from) else None
+    if cached:
+        c_edges, virtual_cnodes = cached
+    else:
+        t0 = time.time()
+        print("Splitting C-edges at intersection nodes...")
+        c_edges = split_c_edges_at_intersection_nodes(
+            c_edges, virtual_cnodes, edge_clusters, edge_features,
+            parallel_angle_threshold=parallel_angle_threshold
+        )
+        print(f"C-edges after splitting: {len(c_edges)} [{time.time() - t0:.1f}s]")
+        if cache_dir:
+            _cache_save(cache_dir, "split_c_edges", (c_edges, virtual_cnodes))
+
     # Step: update_endpoints
     cached = _cache_load(cache_dir, "update_endpoints") if cache_dir and not _should_compute("update_endpoints", resume_from) else None
     if cached:
@@ -743,20 +785,24 @@ def plot_c_edge_graph(
         if cache_dir:
             _cache_save(cache_dir, "update_endpoints", c_edges)
 
-    # Step: split_c_edges
-    cached = _cache_load(cache_dir, "split_c_edges") if cache_dir and not _should_compute("split_c_edges", resume_from) else None
+    # Step: filter_dangling
+    cached = _cache_load(cache_dir, "filter_dangling") if cache_dir and not _should_compute("filter_dangling", resume_from) else None
     if cached:
         c_edges = cached
     else:
         t0 = time.time()
-        print("Splitting C-edges at intersection nodes...")
-        c_edges = split_c_edges_at_intersection_nodes(
-            c_edges, virtual_cnodes, edge_clusters, edge_features,
-            parallel_angle_threshold=parallel_angle_threshold
-        )
-        print(f"C-edges after splitting: {len(c_edges)} [{time.time() - t0:.1f}s]")
+        print("Filtering dangling C-edges...")
+        c_edges = filter_dangling_cedges(c_edges, virtual_cnodes)
+        print(f"C-edges after filter: {len(c_edges)} [{time.time() - t0:.1f}s]")
         if cache_dir:
-            _cache_save(cache_dir, "split_c_edges", c_edges)
+            _cache_save(cache_dir, "filter_dangling", c_edges)
+
+    # Filter orphaned C-nodes (not connected to any surviving C-edge)
+    connected_cnode_ids = set()
+    for ce in c_edges:
+        connected_cnode_ids.update(ce.get('connected_vnodes', []))
+    virtual_cnodes = {cn_id: cn for cn_id, cn in virtual_cnodes.items() if cn_id in connected_cnode_ids}
+    print(f"C-nodes after orphan filter: {len(virtual_cnodes)}")
 
     print(f"Total pipeline: {time.time() - t_total:.1f}s")
 
@@ -766,7 +812,7 @@ def plot_c_edge_graph(
     
     # Add virtual C-node traces
     if virtual_cnodes:
-        traces.append(build_virtual_cnode_traces(virtual_cnodes))
+        traces.append(build_virtual_cnode_traces(virtual_cnodes, c_edges))
     
     # Add reference grid traces
     traces.extend(build_reference_grid_traces(edge_features))

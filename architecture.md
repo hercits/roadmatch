@@ -39,9 +39,10 @@ resource/<city>/             # 缓存的路网数据
      → build_node_to_cedges_map → filter_spur_core_edges
      → identify_connection_nodes → cluster_connection_nodes
      → create_virtual_cnodes → merge_t_junction_cnodes
+     → merge_intermediate_t_junctions
      → find_parallelograms_near_cnodes → cluster_parallelograms
-     → merge_intersection_cnodes → update_c_edge_endpoints
-     → split_c_edges_at_intersection_nodes
+     → merge_intersection_cnodes → split_c_edges_at_intersection_nodes
+     → update_c_edge_endpoints → filter_dangling_cedges
 ```
 
 运行：
@@ -86,11 +87,13 @@ cli.py             ──→  mock, utils
 | 9 | `cluster_connection` | `List[List[str]]` | 连接节点聚类 |
 | 10 | `virtual_cnodes` | `Dict[int, Dict]` | 虚拟 C-node |
 | 11 | `merge_t_junction` | `Dict[int, Dict]` | T 型合并后的 C-node |
-| 12 | `parallelograms` | `List[Dict]` | 平行四边形列表 |
-| 13 | `crossroads` | `List[Dict]` | 十字路口聚类 |
-| 14 | `merge_intersection` | `Dict[int, Dict]` | 交叉口合并后的 C-node |
-| 15 | `update_endpoints` | `List[Dict]` | 更新端点后的 C-edge |
-| 16 | `split_c_edges` | `List[Dict]` | 最终拆分后的 C-edge |
+| 12 | `merge_intermediate_t` | `Dict[int, Dict]` | 中间 T 型合并后的 C-node |
+| 13 | `parallelograms` | `List[Dict]` | 平行四边形列表 |
+| 14 | `crossroads` | `List[Dict]` | 十字路口聚类 |
+| 15 | `merge_intersection` | `Dict[int, Dict]` | 交叉口合并后的 C-node |
+| 16 | `split_c_edges` | `List[Dict]` | 交叉口拆分后的 C-edge |
+| 17 | `update_endpoints` | `List[Dict]` | 更新端点后的 C-edge |
+| 18 | `filter_dangling` | `List[Dict]` | 剔除断头后的 C-edge |
 
 ### 详细结构
 
@@ -233,14 +236,18 @@ clusters
 virtual_cnodes
         ↓ [merge_t_junction_cnodes]
 virtual_cnodes (T 型合并)
+        ↓ [merge_intermediate_t_junctions]
+virtual_cnodes (中间 T 型合并)
         ↓ [find_parallelograms_near_cnodes]
 parallelograms
         ↓ [cluster_parallelograms]
 crossroads
         ↓ [merge_intersection_cnodes]
 virtual_cnodes (交叉口合并)
+        ↓ [split_c_edges_at_intersection_nodes]
+c_edges (交叉口拆分)
         ↓ [update_c_edge_endpoints]
 c_edges (端点更新)
-        ↓ [split_c_edges_at_intersection_nodes]
-c_edges (最终拆分)
+        ↓ [filter_dangling_cedges]
+c_edges (剔除断头)
 ```
