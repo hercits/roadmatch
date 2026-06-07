@@ -1077,6 +1077,24 @@ def _compute_cnode_position(
         return project_to_line(avg_pos, ce['start_coord'], ce['end_coord'])
     
     elif num_groups == 2:
+        has_end_g0 = any(
+            any(ce_idx == ce for ce, _ in c_edge_end_associations)
+            for ce_idx in direction_groups[0]
+        )
+        has_end_g1 = any(
+            any(ce_idx == ce for ce, _ in c_edge_end_associations)
+            for ce_idx in direction_groups[1]
+        )
+        
+        if has_end_g0 and not has_end_g1:
+            main_ce = _cem[direction_groups[1][0]]
+            avg_pos = get_avg_pos()
+            return project_to_line(avg_pos, main_ce['start_coord'], main_ce['end_coord'])
+        elif has_end_g1 and not has_end_g0:
+            main_ce = _cem[direction_groups[0][0]]
+            avg_pos = get_avg_pos()
+            return project_to_line(avg_pos, main_ce['start_coord'], main_ce['end_coord'])
+        
         # Two non-parallel groups: compute intersection
         ce1_idx = direction_groups[0][0]
         ce2_idx = direction_groups[1][0]
@@ -1400,7 +1418,9 @@ def create_virtual_cnodes(
 
 def merge_t_junction_cnodes(
     virtual_cnodes: Dict[int, Dict[str, Any]],
+    c_edges: List[Dict[str, Any]],
     near_threshold_m: float = 50.0,
+    parallel_angle_threshold: float = 30.0,
 ) -> Dict[int, Dict[str, Any]]:
     """Merge T-junction C-nodes into their corresponding endpoint C-nodes.
 
@@ -1412,13 +1432,20 @@ def merge_t_junction_cnodes(
     This function identifies such pairs and merges the T-junction C-node into
     the endpoint C-node, transferring its unique C-edges and associations.
 
+    Parallel edges are excluded: if the T-junction C-node brings C-edges that
+    are parallel to the shared C-edge (angle diff < parallel_angle_threshold),
+    the merge is skipped since parallel edges cannot form a T-junction.
+
     Args:
         virtual_cnodes: Dict from create_virtual_cnodes().
+        c_edges: List of C-edge dicts (needed for direction checks).
         near_threshold_m: Distance threshold for considering C-nodes as close (default 50.0).
+        parallel_angle_threshold: Angle threshold for parallel detection (default 30.0).
 
     Returns:
         Updated dict of virtual C-nodes with T-junctions merged and re-numbered.
     """
+    c_edge_map = {ce['idx']: ce for ce in c_edges}
     cedge_to_cnodes: Dict[int, List[int]] = {}
     for cn_id, vnode in virtual_cnodes.items():
         for ce_idx in vnode['connected_cedges']:
@@ -1455,6 +1482,24 @@ def merge_t_junction_cnodes(
                     elif cn2_has and not cn1_has:
                         ep_cn, tj_cn = cn2_id, cn1_id
                     else:
+                        continue
+
+                    shared_ce = c_edge_map.get(ce)
+                    if not shared_ce:
+                        continue
+                    shared_dir = shared_ce['direction_deg']
+
+                    tj_vnode = virtual_cnodes[tj_cn]
+                    tj_brought = tj_vnode['connected_cedges'] - {ce}
+                    has_parallel = False
+                    for brought_ce_idx in tj_brought:
+                        brought_ce = c_edge_map.get(brought_ce_idx)
+                        if not brought_ce:
+                            continue
+                        if angular_delta_mod180(brought_ce['direction_deg'], shared_dir) < parallel_angle_threshold:
+                            has_parallel = True
+                            break
+                    if has_parallel:
                         continue
 
                     ep_vnode = virtual_cnodes[ep_cn]
@@ -1572,6 +1617,11 @@ def merge_intermediate_t_junctions(
                     cn1_other_ce['direction_deg'], cn2_other_ce['direction_deg']
                 )
                 if angle_diff >= angle_threshold_deg:
+                    continue
+
+                shared_dir = ce['direction_deg']
+                if (angular_delta_mod180(cn1_other_ce['direction_deg'], shared_dir) < angle_threshold_deg or
+                        angular_delta_mod180(cn2_other_ce['direction_deg'], shared_dir) < angle_threshold_deg):
                     continue
 
                 # Check which side of the C-edge the far endpoints of crossing C-edges are on

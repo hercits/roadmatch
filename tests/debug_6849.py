@@ -124,7 +124,7 @@ def main() -> None:
     )
 
     print("Merging T-junction C-nodes...")
-    virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, 50.0)
+    virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, c_edges, 50.0)
 
     print("Finding parallelograms...")
     parallelograms = find_parallelograms_near_cnodes(

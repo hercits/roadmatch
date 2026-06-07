@@ -686,7 +686,7 @@ def plot_c_edge_graph(
     else:
         t0 = time.time()
         print("Merging T-junction C-nodes...")
-        virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, near_threshold_m=near_threshold_m)
+        virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, c_edges, near_threshold_m=near_threshold_m)
         print(f"Virtual C-nodes after merge: {len(virtual_cnodes)} [{time.time() - t0:.1f}s]")
         if cache_dir:
             _cache_save(cache_dir, "merge_t_junction", virtual_cnodes)

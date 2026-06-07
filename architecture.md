@@ -234,7 +234,7 @@ connection_nodes
 clusters
         ↓ [create_virtual_cnodes]
 virtual_cnodes
-        ↓ [merge_t_junction_cnodes]
+        ↓ [merge_t_junction_cnodes] (排除平行边)
 virtual_cnodes (T 型合并)
         ↓ [merge_intermediate_t_junctions]
 virtual_cnodes (中间 T 型合并)

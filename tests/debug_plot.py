@@ -108,7 +108,7 @@ def main():
         parallel_angle_threshold=args.angle_threshold,
     )
     
-    virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, near_threshold_m=args.near_threshold)
+    virtual_cnodes = merge_t_junction_cnodes(virtual_cnodes, c_edges, near_threshold_m=args.near_threshold)
     
     update_c_edge_endpoints(c_edges, virtual_cnodes)
     c_edges = split_c_edges_at_intersection_nodes(
