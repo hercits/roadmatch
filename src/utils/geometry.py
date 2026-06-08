@@ -146,6 +146,22 @@ def angular_delta_mod180(a: float, b: float) -> float:
     return min(d, 180.0 - d)
 
 
+def angular_delta_mod360(a: float, b: float) -> float:
+    """Calculate minimum angular difference on the [0, 360) circle.
+
+    For directed bearings (e.g., from bearing_degrees), computes the
+    smallest angular distance between two full-circle directions.
+
+    Args:
+        a: First bearing in degrees [0, 360).
+        b: Second bearing in degrees [0, 360).
+
+    Returns:
+        Minimum angular difference in degrees, range [0, 180].
+    """
+    return abs((b - a + 180.0) % 360.0 - 180.0)
+
+
 def line_intersection_2d(
     p1: Coordinate, p2: Coordinate,
     p3: Coordinate, p4: Coordinate,

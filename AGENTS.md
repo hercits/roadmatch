@@ -10,6 +10,10 @@ Python 3.12+ tool for recovering road network routes from noisy fiber optic dete
 # Visualization scripts in tests/
 uv run python tests/plot_c_graph.py --data-dir resource/miniquad
 
+# Random path generation (requires plot_c_graph.py cache)
+cd src && uv run python tests/plot_random_path.py --data-dir ../resource/miniquad \
+    --total-length 2000 --num-turns 5 --main-road-ratio 0.6
+
 # CLI (fetch-data only)
 cd src && uv run python cli.py fetch-data --city shanghai --bbox 121.4 31.2 121.5 31.3
 
@@ -19,7 +23,7 @@ cd src && uv run python -m old run-demo --config ../configs/demo_shanghai.yaml
 
 ## Code Structure
 
-- `src/mock/`: Data fetcher, edge splitter, graph simplifier (C-edge clustering)
+- `src/mock/`: Data fetcher, edge splitter, graph simplifier (C-edge clustering), random path generator
 - `src/utils/`: Geometry, OSM helpers, types, errors
 - `src/old/`: Legacy code archive — do not modify, only reference
 - `tests/`: Visualization scripts, not unit tests

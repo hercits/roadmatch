@@ -9,7 +9,8 @@ src/
 ├── mock/                    # 路网数据处理与简化
 │   ├── data_fetcher.py      #   从 OSM 拉取路网数据
 │   ├── edge_splitter.py     #   边分裂：在交叉点处拆分边
-│   └── graph_simplifier.py  #   C-edge 图构建：平行边聚类、节点识别
+│   ├── graph_simplifier.py  #   C-edge 图构建：平行边聚类、节点识别
+│   └── random_path_generator.py  #   随机路径生成：在 C-edge 图上生成满足约束的随机路径
 │
 ├── roadgraphmodel/          # 路网数据模型
 ├── roadmatch/               # 检测数据匹配算法
@@ -21,12 +22,13 @@ src/
 tests/                       # 可视化脚本（非单元测试）
 ├── plot_c_graph.py          #   C-edge 图可视化
 ├── plot_edge_clusters.py    #   边聚类可视化
+├── plot_random_path.py      #   随机路径可视化
 ├── plot_road_network.py     #   路网可视化
 └── plot_split_edges.py      #   边分裂可视化
 
 resource/<city>/             # 缓存的路网数据
 ├── nodes.geojson            #   节点
-├── edges.geojson            #   边
+├── edges.geojson            #   边  
 ├── raw/                     #   原始数据
 └── c_edge_graph.html        #   C-edge 图输出
 ```
@@ -251,3 +253,138 @@ c_edges (端点更新)
         ↓ [filter_dangling_cedges]
 c_edges (剔除断头)
 ```
+
+## 随机路径生成
+
+### 概述
+
+`random_path_generator.py` 在 C-edge 图上生成满足多种约束的随机路径，用于模拟真实的路网行驶轨迹。
+
+### 约束条件
+
+| 约束 | 说明 | 容差 |
+|------|------|------|
+| 总长度 | 路径总长度（米） | ±20% |
+| 拐弯次数 | 行进方向变化超过 60° 的次数 | ±20% |
+| 大路占比 | highway_level ≤ 6 的边长度占比 | ±20% |
+| 方向约束 | forward ≥60%, lateral ≤40%, backward ≤10% | ±20% |
+
+方向定义（相对于随机生成的默认方向）：
+- **forward**: 夹角 < 60°
+- **lateral**: 夹角 60°~120°
+- **backward**: 夹角 > 120°
+
+### 算法流程
+
+```
+1. 选择起点（度数 ≥ 2 的随机节点）
+2. 生成随机默认方向 default_dir ∈ [0°, 360°)
+3. 随机游走（每步选边）：
+   ├── 计算候选边权重：
+   │   ├── 方向偏好（forward/lateral/backward 动态调整）
+   │   ├── 拐弯控制（冷却机制 + 理想间距）
+   │   ├── 回头惩罚（避免原路返回）
+   │   └── 大路/小路偏好（根据当前比例动态调整）
+   ├── 按权重随机选择下一条边
+   ├── 更新统计量（长度、拐弯、方向分布）
+   └── 检查终止条件（总长度 ∈ [0.8L, 1.2L]）
+4. 验证所有约束
+5. 不满足则重试（最多 max_retries 次）
+```
+
+### 拐弯均匀分布
+
+为避免连续拐弯或长时间不拐弯，使用冷却机制：
+- `ideal_gap = est_edges / num_turns`：理想拐弯间距
+- `cooldown = ideal_gap * 0.5`：最小冷却步数
+- 步数 < cooldown 时强制不拐弯
+- 步数 > ideal_gap * 1.5 时偏向拐弯
+
+### 使用方法
+
+```bash
+cd src && uv run python tests/plot_random_path.py \
+    --data-dir ../resource/miniquad \
+    --total-length 2000 \
+    --num-turns 5 \
+    --main-road-ratio 0.6 \
+    --seed 42
+```
+
+参数：
+- `--total-length`: 目标总长度（米）
+- `--num-turns`: 目标拐弯次数
+- `--main-road-ratio`: 大路长度占比（0~1）
+- `--main-road-level`: 大路判定阈值（默认 6，即 secondary 及以上）
+- `--turn-angle`: 拐弯判定角度（默认 60°）
+- `--max-retries`: 最大重试次数（默认 100）
+- `--seed`: 随机种子（可选，用于复现）
+
+### 数据结构
+
+#### `walkable_graph` — `Dict[str, Any]`
+
+```python
+{
+    'nodes': {
+        node_id: {
+            'position': (lon, lat),
+            'edges': [edge_idx, ...]
+        }
+    },
+    'edges': {
+        edge_idx: {
+            'start_node': str,
+            'end_node': str,
+            'length_m': float,
+            'direction_deg': float,
+            'highway_level': int,
+            'start_coord': (lon, lat),
+            'end_coord': (lon, lat)
+        }
+    }
+}
+```
+
+#### `path` — `List[Dict]`
+
+点/边交替出现的连续路径：
+
+```python
+[
+    {'type': 'node', 'id': str, 'position': (lon, lat)},
+    {'type': 'edge', 'idx': int, 'length_m': float, 'direction_deg': float, 'highway_level': int},
+    {'type': 'node', ...},
+    ...
+]
+```
+
+## graph_simplifier 变更
+
+### 新增字段
+
+`build_c_edge_graph` 和 `split_c_edges_at_intersection_nodes` 输出的 C-edge dict 新增：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `length_m` | float | 边长（米），haversine 计算 |
+| `highway_level` | int | 道路等级（取聚类中最小值，越小等级越高） |
+
+### 新增函数
+
+#### `build_walkable_graph(c_edges, virtual_cnodes) -> Dict`
+
+从 C-edge 图构建可行走的邻接表结构，用于随机路径生成。
+- 过滤掉 `is_split=True` 的死边
+- 从 `connected_vnodes` 构建节点邻接关系
+- 补算缺失的 `length_m`
+
+## utils/geometry 变更
+
+### 新增函数
+
+#### `angular_delta_mod360(a, b) -> float`
+
+计算两个有向 bearing（[0°, 360°)）之间的最小角度差，返回值范围 [0°, 180°]。
+
+用于随机路径生成中的行进方向比较（区别于 `angular_delta_mod180` 用于无向边方向比较）。

@@ -417,6 +417,7 @@ def build_c_edge_graph(
 
         t_min = min(t_values)
         t_max = max(t_values)
+        road_length_m = t_max - t_min
 
         start_coord = offset_to_coordinate(origin, major_dir, t_min, 0.0)
         end_coord = offset_to_coordinate(origin, major_dir, t_max, 0.0)
@@ -457,6 +458,9 @@ def build_c_edge_graph(
             'start_node_id': start_node_id,
             'end_node_id': end_node_id,
             'size': len(ec),
+            'length_m': haversine_m(start_coord, end_coord),
+            'road_length_m': road_length_m,
+            'highway_level': min_level,
         })
 
     return c_edges
@@ -2050,6 +2054,9 @@ def split_c_edges_at_intersection_nodes(
                 'end_node_id': end_vnode['id'],
                 'size': len(segment_edges),
                 'connected_vnodes': [start_vnode_id, end_vnode_id],
+                'length_m': haversine_m(start_coord, end_coord),
+                'road_length_m': end_proj - start_proj,
+                'highway_level': c_edge.get('highway_level', 99),
             }
             split_pieces.append(piece)
             next_idx += 1
@@ -2785,4 +2792,105 @@ def find_small_parallelograms(
                                 })
 
     return parallelograms
+
+
+def build_walkable_graph(
+    c_edges: List[Dict[str, Any]],
+    virtual_cnodes: Dict[int, Dict[str, Any]],
+    edge_clusters: List[List[int]] | None = None,
+    edge_features: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    """Build a walkable graph from C-edges and C-nodes for random path generation.
+
+    Filters out split C-edges (is_split=True) and builds an adjacency list
+    structure suitable for random walk algorithms.
+
+    Args:
+        c_edges: List of C-edge dicts from the full pipeline.
+        virtual_cnodes: Dict of C-node dicts from the full pipeline.
+        edge_clusters: Optional list of edge index lists for each C-edge cluster.
+            Used to compute highway_level when not present in c_edges.
+        edge_features: Optional list of edge GeoJSON features.
+            Used to compute highway_level when not present in c_edges.
+
+    Returns:
+        Dict with structure:
+        {
+            'nodes': {node_id: {'position': (lon, lat), 'edges': [edge_idx, ...]}},
+            'edges': {edge_idx: {
+                'start_node': str, 'end_node': str,
+                'length_m': float, 'direction_deg': float,
+                'highway_level': int, 'start_coord': tuple, 'end_coord': tuple
+            }},
+        }
+    """
+    active_edges = [ce for ce in c_edges if not ce.get('is_split', False)]
+
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: Dict[int, Dict[str, Any]] = {}
+
+    for ce in active_edges:
+        ce_idx = ce['idx']
+        connected = ce.get('connected_vnodes', [])
+        if len(connected) < 2:
+            continue
+
+        start_vnode_id = connected[0]
+        end_vnode_id = connected[1]
+
+        if start_vnode_id not in virtual_cnodes or end_vnode_id not in virtual_cnodes:
+            continue
+
+        start_vnode = virtual_cnodes[start_vnode_id]
+        end_vnode = virtual_cnodes[end_vnode_id]
+
+        start_node_id = start_vnode['id']
+        end_node_id = end_vnode['id']
+
+        road_length_m = ce.get('road_length_m')
+        if road_length_m is None:
+            road_length_m = ce.get('length_m')
+        if road_length_m is None:
+            road_length_m = haversine_m(ce['start_coord'], ce['end_coord'])
+
+        highway_level = ce.get('highway_level')
+        if highway_level is None and edge_clusters is not None and edge_features is not None:
+            parent_idx = ce.get('parent_idx', ce_idx)
+            if parent_idx < len(edge_clusters):
+                cluster = edge_clusters[parent_idx]
+                levels = [_edge_highway_level(edge_features[idx]) for idx in cluster if idx < len(edge_features)]
+                highway_level = min(levels) if levels else 99
+            else:
+                highway_level = 99
+        elif highway_level is None:
+            highway_level = 99
+
+        edges[ce_idx] = {
+            'start_node': start_node_id,
+            'end_node': end_node_id,
+            'length_m': road_length_m,
+            'direction_deg': ce['direction_deg'],
+            'highway_level': highway_level,
+            'start_coord': ce['start_coord'],
+            'end_coord': ce['end_coord'],
+        }
+
+        if start_node_id not in nodes:
+            nodes[start_node_id] = {
+                'position': start_vnode['position'],
+                'edges': [],
+            }
+        nodes[start_node_id]['edges'].append(ce_idx)
+
+        if end_node_id not in nodes:
+            nodes[end_node_id] = {
+                'position': end_vnode['position'],
+                'edges': [],
+            }
+        nodes[end_node_id]['edges'].append(ce_idx)
+
+    return {
+        'nodes': nodes,
+        'edges': edges,
+    }
 
