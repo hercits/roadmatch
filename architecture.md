@@ -6,11 +6,14 @@
 src/
 ├── cli.py                   # CLI 入口（fetch-data 子命令）
 │
-├── mock/                    # 路网数据处理与简化
+├── mock/                    # 路网数据处理与模拟
 │   ├── data_fetcher.py      #   从 OSM 拉取路网数据
 │   ├── edge_splitter.py     #   边分裂：在交叉点处拆分边
 │   ├── graph_simplifier.py  #   C-edge 图构建：平行边聚类、节点识别
-│   └── random_path_generator.py  #   随机路径生成：在 C-edge 图上生成满足约束的随机路径
+│   ├── random_path_generator.py  #   随机路径生成：在 C-edge 图上生成满足约束的随机路径
+│   ├── event_simulator.py   #   事件点检测模拟：模拟光缆检测的路口、拐弯、长度
+│   ├── event_simulator_config.py  #   事件模拟器配置参数
+│   └── graph_exporter.py    #   C-edge 图导出为 GeoJSON
 │
 ├── roadgraphmodel/          # 路网数据模型
 ├── roadmatch/               # 检测数据匹配算法
@@ -19,18 +22,28 @@ src/
 │
 └── old/                     # 旧代码归档（不修改）
 
-tests/                       # 可视化脚本（非单元测试）
-├── plot_c_graph.py          #   C-edge 图可视化
+tests/                       # 可视化与生成脚本（非单元测试）
+├── plot_c_graph.py          #   C-edge 图可视化（含道路等级着色）
 ├── plot_edge_clusters.py    #   边聚类可视化
 ├── plot_random_path.py      #   随机路径可视化
 ├── plot_road_network.py     #   路网可视化
-└── plot_split_edges.py      #   边分裂可视化
+├── plot_split_edges.py      #   边分裂可视化
+└── generate_paths.py        #   批量生成路径与检测结果
 
-resource/<city>/             # 缓存的路网数据
-├── nodes.geojson            #   节点
-├── edges.geojson            #   边  
-├── raw/                     #   原始数据
-└── c_edge_graph.html        #   C-edge 图输出
+resource/<city>/             # 路网数据
+├── nodes.geojson            #   C-edge 图节点（简化路网）
+├── edges.geojson            #   C-edge 图边（简化路网）
+├── c_edge_graph.html        #   C-edge 图可视化输出
+└── raw/                     #   原始与中间数据
+    ├── raw_nodes.geojson    #     原始 OSM 节点
+    ├── raw_edges.geojson    #     原始 OSM 边
+    ├── nodes.geojson        #     分割后的节点
+    └── edges.geojson        #     分割后的边
+
+outputs/<city>/              # 生成结果
+└── path_N/                  #   第 N 条路径
+    ├── path.html            #     路径可视化
+    └── detection.json       #     检测结果
 ```
 
 ## C-edge 图流水线
@@ -388,3 +401,164 @@ cd src && uv run python tests/plot_random_path.py \
 计算两个有向 bearing（[0°, 360°)）之间的最小角度差，返回值范围 [0°, 180°]。
 
 用于随机路径生成中的行进方向比较（区别于 `angular_delta_mod180` 用于无向边方向比较）。
+
+## 事件点检测模拟
+
+### 概述
+
+`event_simulator.py` 模拟光缆检测算法的输出，基于真实路径生成带有噪声的检测结果，包括：
+- **路口检测**：识别度 ≥ 3 的节点，区分大路口（≥ 2 条大路）和小路口
+- **拐弯检测**：检测路径在路口处的转向行为
+- **长度检测**：模拟盘留（cable slack）导致的路径长度膨胀
+
+### 检测误差模型
+
+#### 盘留（Cable Slack）
+
+光缆每隔一段距离需要做盘留，导致检测长度比实际更长：
+- **常规盘留间隔**：截断指数分布，范围 [50m, 250m]，均值 150m
+- **路口盘留**：度 ≥ 3 的节点有 40% 概率产生盘留（若距前一盘留 < 50m 则合并）
+- **基础长度**：均匀分布 [10m, 20m]
+- **超大盘留**：概率 = 平均间距 × 0.05 / 100，命中时长度翻倍
+
+#### 路口检测
+
+| 节点类型 | 召回率 |
+|----------|--------|
+| 大路口（≥ 2 条大路） | 80% |
+| 小路口（< 2 条大路） | 30% |
+| 度 = 2（误检） | 10% |
+
+#### 路口范围
+
+路口宽度 = 基础宽度 + 经过边的宽度之和：
+- **基础宽度**：均匀分布 [15m, 50m]
+- **边宽度**：每条相邻边有 50% 概率被经过
+  - motorway: [30m, 70m]
+  - trunk: [20m, 60m]
+  - primary: [15m, 40m]
+  - secondary: [10m, 30m]
+  - tertiary: [5m, 25m]
+  - 其他: [5m, 15m]
+
+#### 拐弯检测
+
+| 置信度 | 占比 | 直行精准率 | 拐弯精准率 |
+|--------|------|------------|------------|
+| medium | 20% | 80% | 60% |
+| medium_high | 60% | 90% | 75% |
+| high | 20% | 97% | 90% |
+
+### 输出格式
+
+```json
+{
+  "path_length(meter)": 33362,
+  "turning": {
+    "1": {
+      "confidence_of_turning_types": "medium",
+      "turning_directions": ["straight"]
+    },
+    "2": {
+      "confidence_of_turning_types": "medium_high",
+      "turning_directions": ["left_or_right"]
+    }
+  },
+  "intersec_after_redund(meter)_l_m_s": [[
+    {"id": 1, "start_m": 150, "end_m": 492, "center_m": 321},
+    {"id": 2, "start_m": 770, "end_m": 972, "center_m": 871}
+  ]]
+}
+```
+
+### 使用方法
+
+```bash
+uv run python tests/generate_paths.py \
+    --data-dir resource/changsha \
+    --city changsha \
+    --max-retries 300
+```
+
+参数：
+- `--data-dir`: 路网数据目录
+- `--city`: 城市名称（用于输出子目录）
+- `--output-dir`: 输出根目录（默认 `outputs`）
+- `--main-road-level`: 大路判定阈值（默认 6）
+- `--turn-angle`: 拐弯判定角度（默认 60°）
+- `--max-retries`: 最大重试次数（默认 100）
+
+## C-edge 图导出
+
+### 概述
+
+`graph_exporter.py` 将 walkable graph 导出为标准 GeoJSON 格式，便于可视化和外部工具使用。
+
+### 输出文件
+
+#### `edges.geojson`
+
+```json
+{
+  "type": "FeatureCollection",
+  "name": "edges",
+  "features": [{
+    "type": "Feature",
+    "properties": {
+      "id": "0",
+      "highway": "secondary",
+      "highway_level": 6,
+      "line_length": 98.7214839,
+      "direction_deg": 179.15,
+      "start_node": "587",
+      "end_node": "0"
+    },
+    "geometry": {
+      "type": "LineString",
+      "coordinates": [[112.9754535, 28.1985242], [112.9754458, 28.1976364]]
+    }
+  }]
+}
+```
+
+#### `nodes.geojson`
+
+```json
+{
+  "type": "FeatureCollection",
+  "name": "nodes",
+  "features": [{
+    "type": "Feature",
+    "properties": {
+      "id": "587",
+      "degree": 3,
+      "connected_edges": ["0", "2836", "8048"]
+    },
+    "geometry": {
+      "type": "Point",
+      "coordinates": [112.9754535, 28.1985242]
+    }
+  }]
+}
+```
+
+### 命名约定
+
+C-edge 图是路网简化的中间产物，构建过程中使用 `C-edge`（聚类边）和 `C-node`（聚类节点）的术语以区分原始 OSM 数据。但一旦完成构建并导出为 GeoJSON，简化路网就是最终的路网表示，不再使用 C-edge/C-node 的命名：
+
+- **构建阶段**（`graph_simplifier.py` 内部）：使用 `C-edge`、`C-node`、`C-node_587` 等术语
+- **导出后**（`nodes.geojson`、`edges.geojson`、`endpoints.json`）：仅使用 `node`、`edge`、`587` 等通用术语
+- **节点 ID 格式**：去除 `C-node_` 前缀，仅保留数字（如 `C-node_587` → `587`）
+
+这一约定适用于所有输出文件，包括检测结果（`detection.json`）和端点信息（`endpoints.json`）。
+
+### 数据规范
+
+- **节点 ID**：去除 `C-node_` 前缀，仅保留数字
+- **坐标精度**：最多 7 位小数（约 1cm 精度）
+- **长度精度**：最多 7 位小数
+- **坐标顺序**：经度在前，纬度在后（WGS84）
+
+### 自动导出
+
+`generate_paths.py` 在构建 walkable graph 后自动调用导出函数，输出到 `resource/<city>/` 目录。

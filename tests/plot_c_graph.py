@@ -43,6 +43,9 @@ from mock.graph_simplifier import (
     update_c_edge_endpoints,
 )
 from utils.geometry import get_bounds_center
+from utils.types import HIGHWAY_LEVEL
+
+LEVEL_TO_HIGHWAY = {v: k for k, v in HIGHWAY_LEVEL.items()}
 
 
 def load_geojson(path: Path) -> list[dict]:
@@ -117,61 +120,89 @@ def build_virtual_cnode_traces(virtual_cnodes: dict[int, dict], c_edges: list[di
 
 
 def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> list[go.Scattermap]:
-    """Build optimized traces for C-edges.
+    """Build optimized traces for C-edges with highway level coloring.
     
-    Optimizations:
-    1. Batch rendering: merge all C-edges into single trace with None separators
-    2. Unified color: use single color instead of cycling
-    3. No legend: disable legend for C-edges
-    4. Midpoint hover: add invisible hover markers at edge midpoints
+    Groups edges by highway level and assigns colors accordingly.
     """
     traces: list[go.Scattermap] = []
 
-    # Batch render all C-edges in a single trace
-    all_lons = []
-    all_lats = []
+    highway_colors = {
+        0: "#e63946",  # motorway - red
+        1: "#e63946",  # motorway_link
+        2: "#f4a261",  # trunk - orange
+        3: "#f4a261",  # trunk_link
+        4: "#e9c46a",  # primary - yellow
+        5: "#e9c46a",  # primary_link
+        6: "#2a9d8f",  # secondary - teal
+        7: "#2a9d8f",  # secondary_link
+        8: "#457b9d",  # tertiary - blue
+        9: "#457b9d",  # tertiary_link
+        10: "#6d6875",  # residential - gray
+        12: "#6d6875",  # living_street
+        14: "#6d6875",  # unclassified
+        99: "#cccccc",  # unknown - light gray
+    }
+
+    highway_widths = {
+        0: 4, 1: 4,
+        2: 3.5, 3: 3.5,
+        4: 3, 5: 3,
+        6: 2.5, 7: 2.5,
+        8: 2, 9: 2,
+        10: 1.5, 12: 1.5, 14: 1.5,
+        99: 1,
+    }
+
+    edges_by_level: dict[int, list[dict]] = {}
+    for ce in c_edges:
+        if ce.get('is_split', False):
+            continue
+        level = ce.get('highway_level', 99)
+        if level not in edges_by_level:
+            edges_by_level[level] = []
+        edges_by_level[level].append(ce)
+
     hover_lons = []
     hover_lats = []
     hover_texts = []
     label_texts = []
 
-    for ce in c_edges:
-        # Skip original C-edges that have been split
-        if ce.get('is_split', False):
-            continue
+    for level in sorted(edges_by_level.keys()):
+        level_edges = edges_by_level[level]
+        all_lons = []
+        all_lats = []
 
-        start = ce["start_coord"]
-        end = ce["end_coord"]
+        for ce in level_edges:
+            start = ce["start_coord"]
+            end = ce["end_coord"]
+            all_lons.extend([start[0], end[0], None])
+            all_lats.extend([start[1], end[1], None])
 
-        # Add line segment with None separator
-        all_lons.extend([start[0], end[0], None])
-        all_lats.extend([start[1], end[1], None])
+            label = _get_cedge_display_label(ce)
+            highway_type = LEVEL_TO_HIGHWAY.get(level, "unknown")
+            hover_text = f"C-edge {label}<br>Highway: {highway_type} (level {level})<br>Size: {ce['size']} edges<br>Direction: {ce['direction_deg']:.1f}°"
 
-        # Build hover text
-        label = _get_cedge_display_label(ce)
-        hover_text = f"C-edge {label}<br>Size: {ce['size']} edges<br>Direction: {ce['direction_deg']:.1f}°"
-        
-        # Add midpoint for hover and label
-        mid_lon = (start[0] + end[0]) / 2
-        mid_lat = (start[1] + end[1]) / 2
-        hover_lons.append(mid_lon)
-        hover_lats.append(mid_lat)
-        hover_texts.append(hover_text)
-        
-        # Add edge index label
-        label_texts.append(label)
+            mid_lon = (start[0] + end[0]) / 2
+            mid_lat = (start[1] + end[1]) / 2
+            hover_lons.append(mid_lon)
+            hover_lats.append(mid_lat)
+            hover_texts.append(hover_text)
+            label_texts.append(label)
 
-    # Single trace for all C-edges
-    traces.append(go.Scattermap(
-        lon=all_lons,
-        lat=all_lats,
-        mode="lines",
-        line=dict(width=2, color="#1f77b4"),
-        showlegend=False,
-        hoverinfo="skip",
-    ))
+        color = highway_colors.get(level, "#cccccc")
+        width = highway_widths.get(level, 1)
+        highway_type = LEVEL_TO_HIGHWAY.get(level, f"level_{level}")
 
-    # Midpoint labels with hover
+        traces.append(go.Scattermap(
+            lon=all_lons,
+            lat=all_lats,
+            mode="lines",
+            line=dict(width=width, color=color),
+            name=f"{highway_type} ({len(level_edges)})",
+            showlegend=True,
+            hoverinfo="skip",
+        ))
+
     if hover_lons:
         traces.append(go.Scattermap(
             lon=hover_lons,
@@ -186,7 +217,6 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
             showlegend=False,
         ))
 
-    # Collect all endpoint nodes
     endpoint_nodes = set()
     for ce in c_edges:
         if ce["start_node_id"]:
@@ -194,7 +224,6 @@ def build_c_edge_traces(c_edges: list[dict], node_coords: dict[str, tuple]) -> l
         if ce["end_node_id"]:
             endpoint_nodes.add(ce["end_node_id"])
 
-    # Add endpoint node markers (batch rendered)
     if endpoint_nodes:
         node_lons = []
         node_lats = []
@@ -828,12 +857,20 @@ def plot_c_edge_graph(
         ),
         margin=dict(l=0, r=0, t=40, b=0),
         title=dict(text=title_text, x=0.5),
-        showlegend=False,
+        showlegend=True,
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01,
+            bgcolor="rgba(255,255,255,0.8)",
+        ),
         dragmode="pan",
     )
 
     if output_path is None:
-        output_path = edges_path.parent / "c_edge_graph.html"
+        output_path = edges_path.parent.parent / "c_edge_graph.html"
 
     fig.write_html(str(output_path))
     print(f"Saved to {output_path}")
@@ -859,8 +896,8 @@ def main() -> None:
                         help="Step name to resume from (skip cache for this and later steps)")
     args = parser.parse_args()
 
-    edges_path = args.edges or args.data_dir / "edges.geojson"
-    nodes_path = args.nodes or args.data_dir / "nodes.geojson"
+    edges_path = args.edges or args.data_dir / "raw" / "edges.geojson"
+    nodes_path = args.nodes or args.data_dir / "raw" / "nodes.geojson"
 
     sliding_window = None
     if args.sliding_window:

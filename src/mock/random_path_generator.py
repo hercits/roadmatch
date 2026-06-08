@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
-from utils.geometry import angular_delta_mod360
+from utils.geometry import angular_delta_mod360, haversine_m
 
 
 def generate_random_path(
@@ -15,6 +15,9 @@ def generate_random_path(
     turn_angle: float = 60.0,
     max_retries: int = 100,
     seed: Optional[int] = None,
+    relax_directional_constraints: bool = False,
+    start_position: Optional[Tuple[float, float]] = None,
+    default_direction: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Generate a random path on the walkable graph satisfying given constraints.
 
@@ -27,6 +30,9 @@ def generate_random_path(
         turn_angle: Angle threshold in degrees to count as a turn.
         max_retries: Maximum retry attempts if constraints not met.
         seed: Random seed for reproducibility.
+        relax_directional_constraints: If True, skip directional ratio validation.
+        start_position: Optional (lon, lat) to find nearest eligible node as start.
+        default_direction: Optional bearing [0, 360) for overall path direction.
 
     Returns:
         Tuple of (path, stats):
@@ -49,22 +55,37 @@ def generate_random_path(
     if not eligible_nodes:
         raise RuntimeError("No nodes with degree >= 2")
 
+    if start_position is not None:
+        start_node = min(
+            eligible_nodes,
+            key=lambda nid: haversine_m(start_position, nodes[nid]['position']),
+        )
+    else:
+        start_node = None
+
     avg_edge_length = sum(e['length_m'] for e in edges.values()) / len(edges)
     est_edges = max(1, int(total_length_m / avg_edge_length))
     ideal_gap = max(1, est_edges / max(1, num_turns))
     cooldown = max(1, int(ideal_gap * 0.5))
 
     for attempt in range(max_retries):
-        start_node = random.choice(eligible_nodes)
-        default_dir = random.uniform(0, 360)
+        if start_node is None:
+            chosen_start = random.choice(eligible_nodes)
+        else:
+            chosen_start = start_node
+
+        if default_direction is not None:
+            chosen_dir = default_direction
+        else:
+            chosen_dir = random.uniform(0, 360)
 
         path, stats = _try_generate_path(
-            nodes, edges, start_node, default_dir,
+            nodes, edges, chosen_start, chosen_dir,
             total_length_m, num_turns, main_road_ratio, main_road_level,
             turn_angle, cooldown, ideal_gap, avg_edge_length,
         )
 
-        if path and _validate_constraints(stats, total_length_m, num_turns, main_road_ratio):
+        if path and _validate_constraints(stats, total_length_m, num_turns, main_road_ratio, relax_directional_constraints):
             return path, stats
 
         if attempt == max_retries - 1 and stats:
@@ -329,6 +350,7 @@ def _validate_constraints(
     total_length_m: float,
     num_turns: int,
     main_road_ratio: float,
+    relax_directional_constraints: bool = False,
 ) -> bool:
     """Validate that path statistics meet constraints (±20% tolerance)."""
     if not stats:
@@ -346,16 +368,17 @@ def _validate_constraints(
     if not (main_road_ratio * 0.8 <= ratio <= main_road_ratio * 1.2):
         return False
 
-    forward_ratio = stats.get('forward_ratio', 0)
-    if forward_ratio < 0.6 * 0.8:
-        return False
+    if not relax_directional_constraints:
+        forward_ratio = stats.get('forward_ratio', 0)
+        if forward_ratio < 0.6 * 0.8:
+            return False
 
-    lateral_ratio = stats.get('lateral_ratio', 0)
-    if lateral_ratio > 0.4 * 1.2:
-        return False
+        lateral_ratio = stats.get('lateral_ratio', 0)
+        if lateral_ratio > 0.4 * 1.2:
+            return False
 
-    backward_ratio = stats.get('backward_ratio', 0)
-    if backward_ratio > 0.1 * 1.2:
-        return False
+        backward_ratio = stats.get('backward_ratio', 0)
+        if backward_ratio > 0.1 * 1.2:
+            return False
 
     return True

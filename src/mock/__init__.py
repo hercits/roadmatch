@@ -1,5 +1,7 @@
 from mock.data_fetcher import fetch_city_road_network
 from mock.edge_splitter import split_edges_at_intersections
+from mock.event_simulator import simulate_detections
+from mock.graph_exporter import export_walkable_graph_to_geojson
 from mock.graph_simplifier import (
     build_c_edge_graph,
     build_walkable_graph,
@@ -12,4 +14,6 @@ __all__ = [
     "cluster_near_parallel_edges",
     "build_c_edge_graph",
     "build_walkable_graph",
+    "simulate_detections",
+    "export_walkable_graph_to_geojson",
 ]

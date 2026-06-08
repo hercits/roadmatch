@@ -146,8 +146,8 @@ def fetch_city_road_network(
     city_dir = resource_root / city_name
     city_dir.mkdir(parents=True, exist_ok=True)
 
-    nodes_path = city_dir / "nodes.geojson"
-    edges_path = city_dir / "edges.geojson"
+    raw_dir = city_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
 
     nx_graph = fetch_osm_road_network(
         bbox=bbox,
@@ -157,10 +157,8 @@ def fetch_city_road_network(
         extra_tags=extra_tags,
     )
 
-    raw_dir = city_dir / "raw"
-    raw_dir.mkdir(exist_ok=True)
-    raw_nodes_path = raw_dir / "nodes.geojson"
-    raw_edges_path = raw_dir / "edges.geojson"
+    raw_nodes_path = raw_dir / "raw_nodes.geojson"
+    raw_edges_path = raw_dir / "raw_edges.geojson"
     save_osmnx_as_geojson_separate(
         nx_graph=nx_graph,
         nodes_path=raw_nodes_path,
@@ -177,7 +175,9 @@ def fetch_city_road_network(
         raw_edges_data["features"],
     )
 
-    save_geojson({"type": "FeatureCollection", "features": split_nodes}, nodes_path)
-    save_geojson({"type": "FeatureCollection", "features": split_edges}, edges_path)
+    split_nodes_path = raw_dir / "nodes.geojson"
+    split_edges_path = raw_dir / "edges.geojson"
+    save_geojson({"type": "FeatureCollection", "features": split_nodes}, split_nodes_path)
+    save_geojson({"type": "FeatureCollection", "features": split_edges}, split_edges_path)
 
     return city_dir

@@ -37,6 +37,7 @@ cd src && uv run python -m old run-demo --config ../configs/demo_shanghai.yaml
 
 ## Data Directories
 
-- `resource/<city>/`: OSM road network GeoJSON (`nodes.geojson`, `edges.geojson`, `raw/`)
+- `resource/<city>/`: C-edge graph (`nodes.geojson`, `edges.geojson`)
+- `resource/<city>/raw/`: Raw OSM data (`raw_nodes.geojson`, `raw_edges.geojson`) and split segments (`nodes.geojson`, `edges.geojson`)
 - `configs/`: YAML config files for legacy CLI
 - `outputs/`: Generated outputs (gitignored)
