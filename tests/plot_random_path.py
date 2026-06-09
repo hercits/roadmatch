@@ -53,6 +53,7 @@ def plot_random_path(
     seed: int | None = None,
     cache_dir: Path | None = None,
     output_path: Path | None = None,
+    ground_truth_dir: Path | None = None,
 ) -> None:
     if cache_dir is None:
         cache_dir = Path("cache") / data_dir.name
@@ -272,7 +273,44 @@ def plot_random_path(
     )
 
     if output_path is None:
-        output_path = data_dir / "random_path.html"
+        if ground_truth_dir is not None and seed is not None:
+            gt_dir = ground_truth_dir / data_dir.name / f"path_{seed}"
+            gt_dir.mkdir(parents=True, exist_ok=True)
+            
+            def strip_prefix(node_id: str) -> str:
+                return node_id.replace("C-node_", "") if node_id.startswith("C-node_") else node_id
+            
+            gt_file = gt_dir / "ground_truth.txt"
+            with open(gt_file, "w") as f:
+                for i, item in enumerate(path):
+                    if item['type'] == 'node':
+                        node_id = strip_prefix(item['id'])
+                        if i + 1 < len(path) and path[i + 1]['type'] == 'edge':
+                            f.write(f"{node_id} {path[i + 1]['idx']}\n")
+                        else:
+                            f.write(f"{node_id}\n")
+            print(f"Saved ground truth to {gt_file}")
+            
+            stats_clean = stats.copy()
+            if 'turns' in stats_clean:
+                stats_clean['turns'] = [
+                    {
+                        **t,
+                        'node_id': strip_prefix(t['node_id']),
+                        'angle': round(t['angle'], 7),
+                        'position': [round(t['position'][0], 7), round(t['position'][1], 7)]
+                    }
+                    for t in stats_clean['turns']
+                ]
+            
+            stats_file = gt_dir / "stats.json"
+            with open(stats_file, "w") as f:
+                json.dump(stats_clean, f, indent=2)
+            print(f"Saved stats to {stats_file}")
+            
+            output_path = gt_dir / "path.html"
+        else:
+            output_path = data_dir / "random_path.html"
 
     fig.write_html(str(output_path))
     print(f"Saved to {output_path}")
@@ -290,7 +328,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--cache-dir", type=Path, default=None, help="Cache directory (default: cache/<data-dir-name>)")
     parser.add_argument("--output", type=Path, default=None, help="Output HTML path")
+    parser.add_argument("--ground-truth-dir", type=Path, default=None, help="Ground truth output directory (default: ground_truth)")
     args = parser.parse_args()
+
+    gt_dir = args.ground_truth_dir
+    if gt_dir is None:
+        gt_dir = args.data_dir.parent.parent / "ground_truth"
 
     plot_random_path(
         data_dir=args.data_dir,
@@ -303,6 +346,7 @@ def main() -> None:
         seed=args.seed,
         cache_dir=args.cache_dir,
         output_path=args.output,
+        ground_truth_dir=gt_dir,
     )
 
 

@@ -44,6 +44,12 @@ outputs/<city>/              # 生成结果
 └── path_N/                  #   第 N 条路径
     ├── path.html            #     路径可视化
     └── detection.json       #     检测结果
+
+ground_truth/<city>/         # 标准答案（用于评估）
+└── path_N/                  #   第 N 条路径（N = seed 值）
+    ├── ground_truth.txt     #     点边序列（node_id edge_id，末行仅 node_id）
+    ├── stats.json           #     路径统计信息
+    └── path.html            #     路径可视化
 ```
 
 ## C-edge 图流水线
@@ -82,6 +88,42 @@ cli.py             ──→  mock, utils
 - 旧代码 `src/old/` 不做修改，重构时按需重新实现
 - 模型文件以 `_model` 后缀命名（如 `event_model.py`），逻辑文件以功能命名
 - 坐标系统：WGS84，`lon, lat` 顺序
+- 数值精度：角度和坐标统一保留小数点后 7 位
+
+## Ground Truth 数据格式
+
+`ground_truth/<city>/path_<seed>/` 目录下包含标准答案文件：
+
+### `ground_truth.txt`
+
+点边交替序列，每行格式：
+- 中间行：`<node_id> <edge_id>` — 节点 ID 和后续边的 ID
+- 末行：`<node_id>` — 终点节点 ID
+
+节点 ID 不含 `C-node_` 前缀，直接使用数字部分。
+
+### `stats.json`
+
+路径统计信息，包含：
+- `total_length_m`：总长度（米）
+- `turn_count`：拐弯次数
+- `main_road_ratio`：大路占比
+- `forward_ratio` / `lateral_ratio` / `backward_ratio`：方向分布
+- `turns`：拐弯详情列表，每项包含：
+  - `node_id`：拐弯节点 ID（不含前缀）
+  - `angle`：拐弯角度（度，保留 7 位小数）
+  - `position`：拐弯位置坐标 `[lon, lat]`（保留 7 位小数）
+
+### 生成命令
+
+```bash
+uv run python tests/plot_random_path.py \
+    --data-dir resource/changsha \
+    --total-length 20000 \
+    --num-turns 12 \
+    --main-road-ratio 0.85 \
+    --seed 1
+```
 
 ## Pipeline 缓存数据结构
 

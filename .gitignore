@@ -14,3 +14,6 @@ resource/
 # IDE and session files
 .idea/
 session-*.md
+
+# One-off scripts
+tests/generate_waypoint_path.py
